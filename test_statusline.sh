@@ -47,6 +47,16 @@ assert_not_contains() {
     fi
 }
 
+# Portable "touch to N minutes ago" — `touch -d '30 minutes ago'` works on GNU
+# coreutils but not on BSD (macOS), which only accepts a fixed timestamp format
+# via `-t`. Compute the timestamp with whichever `date` dialect is available.
+touch_minutes_ago() {
+    local minutes="$1" file="$2" ts
+    ts=$(date -d "$minutes minutes ago" +%Y%m%d%H%M.%S 2>/dev/null) \
+        || ts=$(date -v "-${minutes}M" +%Y%m%d%H%M.%S)
+    touch -t "$ts" "$file"
+}
+
 # ── Unit tests: make_bar ──────────────────────────────────────────────────────
 echo ""
 echo "=== Unit tests: make_bar ==="
@@ -61,7 +71,9 @@ run_make_bar() {
 
 count_char() {
     local char="$1" str="$2"
-    echo -n "$str" | grep -o "$char" | wc -l
+    # BSD `wc -l` right-pads the count with whitespace; GNU does not. Strip it
+    # so downstream string comparisons work on both.
+    echo -n "$str" | grep -o "$char" | wc -l | tr -d ' '
 }
 
 # pct=0 → 6 empty blocks
@@ -164,7 +176,7 @@ echo ""
 echo "-- Test 5: stale cache --"
 USAGE_STALE=$(mktemp /tmp/test-usage-stale-XXXX.json); TMPFILES+=("$USAGE_STALE")
 echo '{"timestamp":"2026-02-21T09:00:00+00:00","source":"api","metrics":{"session":{"percent_used":30.0,"percent_remaining":70.0,"resets_at":null}}}' > "$USAGE_STALE"
-touch -d '30 minutes ago' "$USAGE_STALE"
+touch_minutes_ago 30 "$USAGE_STALE"
 OUT=$(run_statusline '{"model":"claude-sonnet-4-6","context_window":{"used_percentage":0}}' \
     USAGE_FILE="$USAGE_STALE" REFRESH_INTERVAL=300)
 assert_contains "stale cache shows ⚠" "⚠" "$OUT"
@@ -181,7 +193,7 @@ assert_not_contains "fresh cache no ⚠" "⚠" "$OUT"
 # Test 7 — REFRESH_INTERVAL=0 never shows ⚠
 echo ""
 echo "-- Test 7: REFRESH_INTERVAL=0 no stale indicator --"
-touch -d '30 minutes ago' "$USAGE_STALE"
+touch_minutes_ago 30 "$USAGE_STALE"
 OUT=$(run_statusline '{"model":"claude-sonnet-4-6","context_window":{"used_percentage":0}}' \
     USAGE_FILE="$USAGE_STALE" REFRESH_INTERVAL=0)
 assert_not_contains "interval=0 no ⚠" "⚠" "$OUT"

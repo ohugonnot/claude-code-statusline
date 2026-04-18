@@ -146,10 +146,23 @@ fi
 [ "${#BRANCH}" -gt 30 ] && BRANCH="${BRANCH:0:27}..."
 
 # ── Refresh usage via Anthropic OAuth API ────────────────────────────────────
+# Reads the subscription OAuth token from either the legacy credentials file
+# (Linux / older Claude Code installs) or the macOS Keychain (current Darwin
+# installs store the token there instead of on disk).
+read_oauth_token() {
+    if [ -f "$CREDENTIALS_FILE" ]; then
+        jq -r '.claudeAiOauth.accessToken // empty' "$CREDENTIALS_FILE" 2>/dev/null
+        return
+    fi
+    if [ "$(uname)" = "Darwin" ] && command -v security >/dev/null 2>&1; then
+        security find-generic-password -s "Claude Code-credentials" -a "$(whoami)" -w 2>/dev/null \
+            | jq -r '.claudeAiOauth.accessToken // empty' 2>/dev/null
+    fi
+}
+
 refresh_usage_api() {
-    [ ! -f "$CREDENTIALS_FILE" ] && return 1
     local token
-    token=$(jq -r '.claudeAiOauth.accessToken // empty' "$CREDENTIALS_FILE" 2>/dev/null)
+    token=$(read_oauth_token)
     [ -z "$token" ] && return 1
     local resp
     resp=$(curl -s --max-time 3 \
@@ -183,7 +196,15 @@ refresh_usage_api() {
 
 LOCK_FILE="/tmp/statusline-refresh.lock"
 if [ "$(cache_age_sec)" -gt "$REFRESH_INTERVAL" ]; then
-    ( flock -n 9 || exit 0; refresh_usage_api ) 9>"$LOCK_FILE"
+    if command -v flock >/dev/null 2>&1; then
+        ( flock -n 9 || exit 0; refresh_usage_api ) 9>"$LOCK_FILE"
+    else
+        # macOS does not ship `flock` by default. The cache_age_sec gate above
+        # already throttles to one refresh per REFRESH_INTERVAL; concurrent
+        # renders racing through that gate would cause at most 1-2 duplicate
+        # API calls per interval for a single user, which is acceptable.
+        refresh_usage_api
+    fi
 fi
 
 # ── Read cached usage metrics ─────────────────────────────────────────────────
@@ -275,7 +296,7 @@ if [ -f "$USAGE_FILE" ] && [ "$REFRESH_INTERVAL" -gt 0 ] 2>/dev/null; then
     [ "$(cache_age_sec)" -gt $(( REFRESH_INTERVAL * 3 )) ] && IS_STALE=1
 fi
 [ "$IS_STALE" = 1 ] && [ -n "$BLOCK_DISPLAY" ] && \
-    BLOCK_DISPLAY=$(echo "$BLOCK_DISPLAY" | sed 's/🟢\|🟡\|🔴/⚠/')
+    BLOCK_DISPLAY=$(echo "$BLOCK_DISPLAY" | sed -E 's/(🟢|🟡|🔴)/⚠/')
 
 # ── Assemble ──────────────────────────────────────────────────────────────────
 PARTS=()
