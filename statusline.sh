@@ -147,9 +147,14 @@ fi
 
 # ── Refresh usage via Anthropic OAuth API ────────────────────────────────────
 refresh_usage_api() {
-    [ ! -f "$CREDENTIALS_FILE" ] && return 1
-    local token
-    token=$(jq -r '.claudeAiOauth.accessToken // empty' "$CREDENTIALS_FILE" 2>/dev/null)
+    local token creds
+    if [ -f "$CREDENTIALS_FILE" ]; then
+        token=$(jq -r '.claudeAiOauth.accessToken // empty' "$CREDENTIALS_FILE" 2>/dev/null)
+    fi
+    if [ -z "$token" ] && command -v security >/dev/null 2>&1; then
+        creds=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null)
+        [ -n "$creds" ] && token=$(printf '%s' "$creds" | jq -r '.claudeAiOauth.accessToken // empty' 2>/dev/null)
+    fi
     [ -z "$token" ] && return 1
     local resp
     resp=$(curl -s --max-time 3 \

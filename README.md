@@ -44,7 +44,7 @@ Claude Code → JSON stdin → statusline.sh → formatted status string
 
 Every 60 seconds (configurable), the script calls the Anthropic usage API with your OAuth token. The call takes ~200ms and runs inline — no background processes, no tmux, no scraping.
 
-The OAuth token is read from `~/.claude/.credentials.json`, which Claude Code maintains automatically during active sessions. If the token is expired or the API is unreachable, the script silently falls back to cached data or displays without usage info.
+The OAuth token is read from `~/.claude/.credentials.json`, which Claude Code maintains automatically during active sessions. On macOS, where Claude Code stores credentials in the system Keychain instead of a file, the script falls back to `security find-generic-password -s "Claude Code-credentials" -w`. If the token is expired or the API is unreachable, the script silently falls back to cached data or displays without usage info.
 
 ### About the Usage API
 
@@ -121,7 +121,7 @@ You may have been rate-limited by the Anthropic API (e.g. `REFRESH_INTERVAL` was
 > **Multiple Claude Code windows?** All windows share the same cache file (`~/.claude/usage-exact.json`). Whichever window renders first past the 60s mark will call the API and refresh the cache for all others. You won't get multiple simultaneous API calls from the same machine.
 
 **Usage bars missing?**
-Check that `~/.claude/.credentials.json` exists and contains a valid `claudeAiOauth.accessToken`. This file is created automatically when you log into Claude Code.
+Check that `~/.claude/.credentials.json` exists and contains a valid `claudeAiOauth.accessToken`. This file is created automatically when you log into Claude Code. On macOS, credentials live in the Keychain instead — verify with `security find-generic-password -s "Claude Code-credentials" -w | jq .claudeAiOauth.accessToken`.
 
 **Force a refresh:**
 ```bash
