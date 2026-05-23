@@ -40,7 +40,9 @@ iso_to_epoch() {
     local core="${iso%[+-][0-9][0-9]:*}"  # strip +HH:MM / -HH:MM suffix
     core="${core%Z}"                       # strip trailing Z
     core="${core%%.*}"                     # strip .fractional
-    date -jf "%Y-%m-%dT%H:%M:%S" "$core" +%s 2>/dev/null
+    # TZ=UTC: API returns UTC ISO timestamps; without this, BSD date treats
+    # the stripped core as local time and the epoch ends up offset by TZ.
+    TZ=UTC date -jf "%Y-%m-%dT%H:%M:%S" "$core" +%s 2>/dev/null
 }
 
 file_mtime() {
