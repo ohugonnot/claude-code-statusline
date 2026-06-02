@@ -2,7 +2,6 @@
 # ════════════════════════════════════════════════════════════════════════════
 # Claude Code — Status Line with real-time usage tracking
 #
-# Self-contained: everything is in this single file, no external scripts.
 # Dependencies: bash, jq, curl
 # License: MIT
 #
@@ -36,11 +35,13 @@ format_remaining() {
 iso_to_epoch() {
     local iso="$1"
     date -d "$iso" +%s 2>/dev/null && return
-    # macOS/BSD fallback: strip timezone offset then fractional seconds, parse core
+    # macOS/BSD fallback: strip the offset/Z and fractional seconds, then parse the
+    # core as UTC (-u). The API always sends +00:00, so the stripped wall-clock IS
+    # UTC; without -u, date -j would read it as local time and skew the countdown.
     local core="${iso%[+-][0-9][0-9]:*}"  # strip +HH:MM / -HH:MM suffix
     core="${core%Z}"                       # strip trailing Z
     core="${core%%.*}"                     # strip .fractional
-    date -jf "%Y-%m-%dT%H:%M:%S" "$core" +%s 2>/dev/null
+    date -juf "%Y-%m-%dT%H:%M:%S" "$core" +%s 2>/dev/null
 }
 
 file_mtime() {
@@ -58,12 +59,20 @@ cache_age_sec() {
     echo "$age"
 }
 
+# Coerce to a bare non-negative integer. Drops the decimal part then strips any
+# non-digit. Critical: percentages/resets flow into $(( )), where a value like
+# "x[$(cmd)]" would execute cmd via arithmetic array-subscript evaluation.
+num() {
+    local v="${1%%.*}"
+    v="${v//[^0-9]/}"
+    echo "$(( 10#${v:-0} ))"   # 10# forces base 10 — a leading zero would be read as octal
+}
+
 # make_bar <percent> → sets BAR_COLOR and BAR_STR (6-block bar)
 make_bar() {
-    local pct="$1"
-    [ "$pct" -lt 0 ] 2>/dev/null && pct=0
-    [ "$pct" -gt 100 ] 2>/dev/null && pct=100
-    local filled=$(( (pct + 16) / 17 )); [ $filled -gt 6 ] && filled=6
+    local pct; pct="$(num "$1")"
+    [ "$pct" -gt 100 ] && pct=100
+    local filled=$(( (pct + 16) / 17 )); [ $filled -gt 6 ] && filled=6   # 17 = ceil(100/6): round onto 6 blocks
     local empty=$(( 6 - filled ))
     BAR_STR=""
     local i
@@ -75,11 +84,33 @@ make_bar() {
     fi
 }
 
+# render_quota <emoji> <percent> <reset_epoch> → "emoji color bar pct% [↻ remain]".
+# A reset moment already in the past means the window rolled over → usage back to 0%.
+# Needs NOW set by the caller.
+render_quota() {
+    local emoji="$1" reset="$3" remain="" pct
+    pct="$(num "$2")"
+    if [ -n "$reset" ] && [ "$reset" -gt "$NOW" ] 2>/dev/null; then
+        remain=$(format_remaining $(( reset - NOW )))
+    elif [ -n "$reset" ] && [ "$reset" -le "$NOW" ] 2>/dev/null; then
+        pct=0
+    fi
+    make_bar "$pct"
+    local out="${emoji} ${BAR_COLOR} ${BAR_STR} ${pct}%"
+    [ -n "$remain" ] && out="${out} ↻ ${remain}"
+    echo "$out"
+}
+
 # ── Read JSON input from stdin ────────────────────────────────────────────────
 JSON=$(cat)
 
 # ── Parse all stdin fields in a single jq call ───────────────────────────────
-IFS='|' read -r J_MODEL_DISPLAY J_MODEL_RAW J_CTX_PCT J_CTX_SIZE J_COST J_DURATION J_CWD \
+# Joined on US (0x1f), not "|": a "|" in a branch path or model name would shift
+# every field. US is non-whitespace so read preserves empty fields (absent
+# rate_limits). rate_limits.* is native since Claude Code 2.1.x (Pro/Max) —
+# preferred over the API call when present.
+IFS=$'\x1f' read -r J_MODEL_DISPLAY J_MODEL_RAW J_CTX_PCT J_CTX_SIZE J_COST J_DURATION J_CWD \
+    J_RL_5H_PCT J_RL_5H_RESET J_RL_7D_PCT J_RL_7D_RESET \
     < <(echo "$JSON" | jq -r '[
         (if .model | type == "object" then .model.display_name // "" else "" end),
         (if .model | type == "string" then .model else "" end),
@@ -87,8 +118,12 @@ IFS='|' read -r J_MODEL_DISPLAY J_MODEL_RAW J_CTX_PCT J_CTX_SIZE J_COST J_DURATI
         (.context_window.context_window_size // 0),
         (.cost.total_cost_usd // ""),
         (.cost.total_duration_ms // ""),
-        (.workspace.current_dir // "")
-    ] | join("|")' 2>/dev/null)
+        (.workspace.current_dir // ""),
+        (.rate_limits.five_hour.used_percentage // ""),
+        (.rate_limits.five_hour.resets_at // ""),
+        (.rate_limits.seven_day.used_percentage // ""),
+        (.rate_limits.seven_day.resets_at // "")
+    ] | join("\u001f")' 2>/dev/null)
 
 # ── Model ─────────────────────────────────────────────────────────────────────
 MODEL="$J_MODEL_DISPLAY"
@@ -104,7 +139,7 @@ esac
 
 # ── Effort level (from settings.json — not yet in stdin JSON) ────────────────
 EFFORT_LABEL=""
-SETTINGS_FILE="$HOME/.claude/settings.json"
+SETTINGS_FILE="${SETTINGS_FILE:-$HOME/.claude/settings.json}"
 if [ -f "$SETTINGS_FILE" ]; then
     case "$(jq -r '.effortLevel // empty' "$SETTINGS_FILE" 2>/dev/null)" in
         low)    EFFORT_LABEL="lo" ;;
@@ -115,20 +150,20 @@ if [ -f "$SETTINGS_FILE" ]; then
 fi
 
 # ── Context window ────────────────────────────────────────────────────────────
-CTX_PERCENT="${J_CTX_PCT:-0}"
+CTX_PERCENT="$(num "${J_CTX_PCT:-0}")"
 CTX_LABEL="Ctx"
-[ "$J_CTX_SIZE" -ge 900000 ] 2>/dev/null && CTX_LABEL="1M"
+[ "$J_CTX_SIZE" -ge 900000 ] 2>/dev/null && CTX_LABEL="1M"   # ≥900k → extended 1M context
 
 make_bar "$CTX_PERCENT"
 CTX_COLOR="$BAR_COLOR" CTX_BAR="$BAR_STR"
 
 # ── Session cost + duration ───────────────────────────────────────────────────
 COST_STR="" DURATION_STR=""
-if [ -n "$J_COST" ] && [ "$J_COST" != "0" ] && [ "$J_COST" != "null" ]; then
+if [[ "$J_COST" =~ ^[0-9]+(\.[0-9]+)?$ ]] && [ "$J_COST" != "0" ]; then
     COST_STR=$(printf '$%.2f' "$J_COST" 2>/dev/null)
 fi
 if [ -n "$J_DURATION" ] && [ "$J_DURATION" != "0" ] && [ "$J_DURATION" != "null" ]; then
-    DURATION_STR=$(format_remaining $(( J_DURATION / 1000 )))
+    DURATION_STR=$(format_remaining $(( $(num "$J_DURATION") / 1000 )))
 fi
 
 # ── Git branch ────────────────────────────────────────────────────────────────
@@ -158,7 +193,9 @@ refresh_usage_api() {
         -H "anthropic-beta: oauth-2025-04-20" \
         -H "Content-Type: application/json" 2>/dev/null)
     echo "$resp" | jq -e '.five_hour.utilization' >/dev/null 2>&1 || return 1
-    echo "$resp" | jq '{
+    local tmp
+    tmp=$(mktemp "${USAGE_FILE}.XXXXXX") || return 1
+    if echo "$resp" | jq '{
         timestamp: (now | todate),
         source: "api",
         metrics: {
@@ -178,104 +215,115 @@ refresh_usage_api() {
                 resets_at: .seven_day_sonnet.resets_at
             } else null end)
         }
-    }' > "${USAGE_FILE}.tmp" && mv "${USAGE_FILE}.tmp" "$USAGE_FILE"
+    }' > "$tmp"; then
+        mv "$tmp" "$USAGE_FILE"
+    else
+        rm -f "$tmp"; return 1
+    fi
 }
 
-LOCK_FILE="/tmp/statusline-refresh.lock"
-if [ "$(cache_age_sec)" -gt "$REFRESH_INTERVAL" ]; then
-    ( flock -n 9 || exit 0; refresh_usage_api ) 9>"$LOCK_FILE"
+# Native stdin rate_limits (Pro/Max, CC ≥2.1.x) cover session + weekly-all. The
+# API is only needed for the Sonnet quota (SHOW_WEEKLY) or as a fallback when the
+# stdin field is absent — so most renders make no network call at all.
+HAVE_STDIN_SESSION=0
+[ -n "$J_RL_5H_PCT" ] && [ "$J_RL_5H_PCT" != "null" ] && HAVE_STDIN_SESSION=1
+NEED_API=1
+[ "$HAVE_STDIN_SESSION" = 1 ] && [ "$SHOW_WEEKLY" != "1" ] && NEED_API=0
+
+[[ "$REFRESH_INTERVAL" =~ ^[0-9]+$ ]] || REFRESH_INTERVAL=300
+
+# Lock outside world-writable /tmp to avoid a symlink/clobber on shared hosts.
+LOCK_FILE="${XDG_RUNTIME_DIR:-$HOME/.claude}/statusline-refresh.lock"
+if [ "$NEED_API" = 1 ] && [ "$(cache_age_sec)" -gt "$REFRESH_INTERVAL" ]; then
+    # 2>/dev/null: if the lock dir is missing, skip the refresh quietly (no stderr noise)
+    ( flock -n 9 || exit 0; refresh_usage_api ) 9>"$LOCK_FILE" 2>/dev/null
 fi
 
-# ── Read cached usage metrics ─────────────────────────────────────────────────
+# ── Resolve usage metrics: native stdin (preferred) → API cache (fallback) ────
 BLOCK_DISPLAY="" WEEK_SONNET_DISPLAY=""
 NOW=$(date +%s)
 
+SESS_PCT="" SESS_EPOCH="" SESS_FROM_CACHE=0
+WEEK_PCT="" WEEK_EPOCH="" SONNET_PCT=""
+
+# Leave the epoch empty when no reset is sent — num("") is "0", which render_quota
+# would read as a past reset and wrongly zero the live percentage.
+if [ "$HAVE_STDIN_SESSION" = 1 ]; then
+    SESS_PCT="$J_RL_5H_PCT"
+    [ -n "$J_RL_5H_RESET" ] && [ "$J_RL_5H_RESET" != "null" ] && SESS_EPOCH="$(num "$J_RL_5H_RESET")"
+fi
+if [ "$SHOW_WEEKLY" = "1" ] && [ -n "$J_RL_7D_PCT" ] && [ "$J_RL_7D_PCT" != "null" ]; then
+    WEEK_PCT="$J_RL_7D_PCT"
+    [ -n "$J_RL_7D_RESET" ] && [ "$J_RL_7D_RESET" != "null" ] && WEEK_EPOCH="$(num "$J_RL_7D_RESET")"
+fi
+
+# Cache only fills metrics stdin didn't provide. resets_at parsed as ISO 8601
+# (API format); the Sonnet weekly quota is API-only (absent from stdin).
 if [ -f "$USAGE_FILE" ]; then
-    # Single jq call to read all cache fields
-    IFS='|' read -r CACHE_SOURCE U_SESS_PCT U_SESS_RESETS U_WEEK_PCT U_WEEK_RESETS U_SONNET_PCT \
+    IFS=$'\x1f' read -r CACHE_SOURCE U_SESS_PCT U_SESS_RESETS U_WEEK_PCT U_WEEK_RESETS U_SONNET_PCT \
         < <(jq -r '[
             (.source // "legacy"),
             (.metrics.session.percent_used     // ""),
-            (.metrics.session.resets_at        // .metrics.session.resets // ""),
+            (.metrics.session.resets_at        // ""),
             (.metrics.week_all.percent_used    // ""),
-            (.metrics.week_all.resets_at       // .metrics.week_all.resets // ""),
+            (.metrics.week_all.resets_at       // ""),
             (.metrics.week_sonnet.percent_used // "")
-        ] | join("|")' "$USAGE_FILE" 2>/dev/null)
+        ] | join("\u001f")' "$USAGE_FILE" 2>/dev/null)
 
-    if [ -n "$CACHE_SOURCE" ]; then
-        # Session block
-        if [ -n "$U_SESS_PCT" ] && [ "$U_SESS_PCT" != "null" ]; then
-            SESS_INT="${U_SESS_PCT%.*}"
-            REMAIN_STR=""
-            RESET_EPOCH=""
-            if [ -n "$U_SESS_RESETS" ] && [ "$U_SESS_RESETS" != "null" ]; then
-                if [ "$CACHE_SOURCE" = "api" ]; then
-                    RESET_EPOCH=$(iso_to_epoch "$U_SESS_RESETS")
-                else
-                    RESET_TZ=$(echo "$U_SESS_RESETS" | sed -n 's/.*(\([^)]*\)).*/\1/p')
-                    [ -z "$RESET_TZ" ] && RESET_TZ="${TIMEZONE}"
-                    RESET_TIME_STR=$(echo "$U_SESS_RESETS" | sed 's/ *([^)]*)//')
-                    RESET_EPOCH=$(tz_date "${RESET_TZ}" -d "today $RESET_TIME_STR" +%s 2>/dev/null)
-                    [ -n "$RESET_EPOCH" ] && [ "$RESET_EPOCH" -le "$NOW" ] && \
-                        RESET_EPOCH=$(tz_date "${RESET_TZ}" -d "tomorrow $RESET_TIME_STR" +%s 2>/dev/null)
-                fi
-                if [ -n "$RESET_EPOCH" ] && [ "$RESET_EPOCH" -gt "$NOW" ]; then
-                    REMAIN_STR=$(format_remaining $(( RESET_EPOCH - NOW )))
-                elif [ -n "$RESET_EPOCH" ] && [ "$RESET_EPOCH" -le "$NOW" ]; then
-                    # Session has reset since last API call — usage is back to ~0%
-                    SESS_INT=0
-                fi
-            fi
-            make_bar "$SESS_INT"
-            if [ -n "$REMAIN_STR" ]; then
-                BLOCK_DISPLAY="⏳ ${BAR_COLOR} ${BAR_STR} ${SESS_INT}% ↻ ${REMAIN_STR}"
-            else
-                BLOCK_DISPLAY="⏳ ${BAR_COLOR} ${BAR_STR} ${SESS_INT}%"
-            fi
+    if [ -z "$SESS_PCT" ] && [ -n "$U_SESS_PCT" ] && [ "$U_SESS_PCT" != "null" ]; then
+        SESS_PCT="$U_SESS_PCT"; SESS_FROM_CACHE=1
+        [ "$CACHE_SOURCE" = "api" ] && [ -n "$U_SESS_RESETS" ] && SESS_EPOCH="$(iso_to_epoch "$U_SESS_RESETS")"
+    fi
+    if [ "$SHOW_WEEKLY" = "1" ]; then
+        if [ -z "$WEEK_PCT" ] && [ -n "$U_WEEK_PCT" ] && [ "$U_WEEK_PCT" != "null" ]; then
+            WEEK_PCT="$U_WEEK_PCT"
+            [ "$CACHE_SOURCE" = "api" ] && [ -n "$U_WEEK_RESETS" ] && WEEK_EPOCH="$(iso_to_epoch "$U_WEEK_RESETS")"
         fi
-
-        # Weekly + Sonnet (opt-in)
-        WEEK_INT="" WEEK_COLOR="" WEEK_RESET_LABEL="" SONNET_INT="" SONNET_COLOR=""
-        if [ "$SHOW_WEEKLY" = "1" ] && [ -n "$U_WEEK_PCT" ] && [ "$U_WEEK_PCT" != "null" ]; then
-            WEEK_INT="${U_WEEK_PCT%.*}"
-            if [ -n "$U_WEEK_RESETS" ] && [ "$U_WEEK_RESETS" != "null" ]; then
-                if [ "$CACHE_SOURCE" = "api" ]; then
-                    WEEK_EPOCH=$(iso_to_epoch "$U_WEEK_RESETS")
-                else
-                    WEEK_TZ=$(echo "$U_WEEK_RESETS" | sed -n 's/.*(\([^)]*\)).*/\1/p')
-                    [ -z "$WEEK_TZ" ] && WEEK_TZ="${TIMEZONE}"
-                    DATE_PART=$(echo "$U_WEEK_RESETS" | sed 's/ *([^)]*)//' | sed 's/,//')
-                    WEEK_EPOCH=$(tz_date "${WEEK_TZ}" -d "$DATE_PART" +%s 2>/dev/null)
-                fi
-                [ -n "$WEEK_EPOCH" ] && \
-                    WEEK_RESET_LABEL=$(tz_date "${TIMEZONE}" -d "@$WEEK_EPOCH" +"%a %Hh" 2>/dev/null \
-                        | tr '[:upper:]' '[:lower:]')
-            fi
-            make_bar "$WEEK_INT"; WEEK_COLOR="$BAR_COLOR"
-        fi
-        if [ "$SHOW_WEEKLY" = "1" ] && [ -n "$U_SONNET_PCT" ] && [ "$U_SONNET_PCT" != "null" ]; then
-            SONNET_INT="${U_SONNET_PCT%.*}"
-            make_bar "$SONNET_INT"; SONNET_COLOR="$BAR_COLOR"
-        fi
-        if [ -n "$WEEK_INT" ] && [ -n "$SONNET_INT" ]; then
-            WEEK_SONNET_DISPLAY="📅 ${WEEK_COLOR} ${WEEK_INT}% / Snt ${SONNET_COLOR} ${SONNET_INT}%"
-            [ -n "$WEEK_RESET_LABEL" ] && WEEK_SONNET_DISPLAY+=" ↻ ${WEEK_RESET_LABEL}"
-        elif [ -n "$WEEK_INT" ]; then
-            WEEK_SONNET_DISPLAY="📅 ${WEEK_COLOR} ${WEEK_INT}%"
-            [ -n "$WEEK_RESET_LABEL" ] && WEEK_SONNET_DISPLAY+=" ↻ ${WEEK_RESET_LABEL}"
-        elif [ -n "$SONNET_INT" ]; then
-            WEEK_SONNET_DISPLAY="Snt ${SONNET_COLOR} ${SONNET_INT}%"
-        fi
+        [ -n "$U_SONNET_PCT" ] && [ "$U_SONNET_PCT" != "null" ] && SONNET_PCT="$U_SONNET_PCT"
     fi
 fi
 
-# ── Stale indicator — replace color dot with ⚠ when cache is stale ──────────
-IS_STALE=0
-if [ -f "$USAGE_FILE" ] && [ "$REFRESH_INTERVAL" -gt 0 ] 2>/dev/null; then
-    [ "$(cache_age_sec)" -gt $(( REFRESH_INTERVAL * 3 )) ] && IS_STALE=1
+# ── Render ────────────────────────────────────────────────────────────────────
+[ -n "$SESS_PCT" ] && [ "$SESS_PCT" != "null" ] && \
+    BLOCK_DISPLAY="$(render_quota "⏳" "$SESS_PCT" "$SESS_EPOCH")"
+
+if [ "$SHOW_WEEKLY" = "1" ]; then
+    WEEK_INT="" WEEK_COLOR="" WEEK_RESET_LABEL="" SONNET_INT="" SONNET_COLOR=""
+    if [ -n "$WEEK_PCT" ] && [ "$WEEK_PCT" != "null" ]; then
+        WEEK_INT="$(num "$WEEK_PCT")"; make_bar "$WEEK_INT"; WEEK_COLOR="$BAR_COLOR"
+        if [ -n "$WEEK_EPOCH" ]; then
+            # GNU date -d @epoch || BSD date -r epoch
+            WEEK_RESET_LABEL=$(tz_date "${TIMEZONE}" -d "@$WEEK_EPOCH" +"%a %Hh" 2>/dev/null \
+                || tz_date "${TIMEZONE}" -r "$WEEK_EPOCH" +"%a %Hh" 2>/dev/null)
+            WEEK_RESET_LABEL=$(echo "$WEEK_RESET_LABEL" | tr '[:upper:]' '[:lower:]')
+        fi
+    fi
+    if [ -n "$SONNET_PCT" ] && [ "$SONNET_PCT" != "null" ]; then
+        SONNET_INT="$(num "$SONNET_PCT")"; make_bar "$SONNET_INT"; SONNET_COLOR="$BAR_COLOR"
+    fi
+    if [ -n "$WEEK_INT" ] && [ -n "$SONNET_INT" ]; then
+        WEEK_SONNET_DISPLAY="📅 ${WEEK_COLOR} ${WEEK_INT}% / Snt ${SONNET_COLOR} ${SONNET_INT}%"
+        [ -n "$WEEK_RESET_LABEL" ] && WEEK_SONNET_DISPLAY+=" ↻ ${WEEK_RESET_LABEL}"
+    elif [ -n "$WEEK_INT" ]; then
+        WEEK_SONNET_DISPLAY="📅 ${WEEK_COLOR} ${WEEK_INT}%"
+        [ -n "$WEEK_RESET_LABEL" ] && WEEK_SONNET_DISPLAY+=" ↻ ${WEEK_RESET_LABEL}"
+    elif [ -n "$SONNET_INT" ]; then
+        WEEK_SONNET_DISPLAY="Snt ${SONNET_COLOR} ${SONNET_INT}%"
+    fi
 fi
-[ "$IS_STALE" = 1 ] && [ -n "$BLOCK_DISPLAY" ] && \
-    BLOCK_DISPLAY=$(echo "$BLOCK_DISPLAY" | sed 's/🟢\|🟡\|🔴/⚠/')
+
+# ── Stale indicator — ⚠ in place of color dot. Only when session came from the
+# cache: stdin rate_limits are always fresh, so cache age is irrelevant there.
+IS_STALE=0
+if [ "$SESS_FROM_CACHE" = 1 ] && [ -f "$USAGE_FILE" ] && [ "$REFRESH_INTERVAL" -gt 0 ] 2>/dev/null; then
+    [ "$(cache_age_sec)" -gt $(( REFRESH_INTERVAL * 3 )) ] && IS_STALE=1   # 3 missed refresh windows
+fi
+if [ "$IS_STALE" = 1 ] && [ -n "$BLOCK_DISPLAY" ]; then
+    # Exactly one color dot is present; the other two replacements are no-ops.
+    BLOCK_DISPLAY="${BLOCK_DISPLAY/🟢/⚠}"
+    BLOCK_DISPLAY="${BLOCK_DISPLAY/🟡/⚠}"
+    BLOCK_DISPLAY="${BLOCK_DISPLAY/🔴/⚠}"
+fi
 
 # ── Assemble ──────────────────────────────────────────────────────────────────
 PARTS=()
@@ -300,4 +348,4 @@ for part in "${PARTS[@]}"; do
     [ -z "$RESULT" ] && RESULT="$part" || RESULT="$RESULT │ $part"
 done
 
-echo "${RESULT}${REFRESH_SUFFIX}"
+echo "${RESULT}"

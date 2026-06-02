@@ -1,5 +1,7 @@
 #!/bin/bash
 # Tests for statusline.sh
+# shellcheck disable=SC1090  # source <(sed ...) — dynamic, can't be followed
+# shellcheck disable=SC2016  # single-quoted '$1.50' etc. are intentional literal assertions
 
 STATUSLINE_SH="$(dirname "$(realpath "$0")")/statusline.sh"
 PASS=0; FAIL=0
@@ -51,8 +53,9 @@ assert_not_contains() {
 echo ""
 echo "=== Unit tests: make_bar ==="
 
-# Extract make_bar function from statusline.sh and source it
-eval "$(awk '/^make_bar\(\)/,/^\}/' "$STATUSLINE_SH")"
+# Source every helper (config + functions) up to the stdin read — robust against
+# refactors, unlike extracting a single function by name with awk.
+source <(sed '/^# ── Read JSON input from stdin/,$d' "$STATUSLINE_SH")
 
 run_make_bar() {
     BAR_STR=""; BAR_COLOR=""
@@ -103,6 +106,26 @@ echo "-- Edge cases --"
 run_make_bar 1
 assert_contains "pct=1: has filled block" "▓" "$BAR_STR"
 
+# ── Unit tests: num (security — arithmetic injection guard) ──────────────────
+echo ""
+echo "=== Unit tests: num ==="
+assert_eq "num strips decimal"        "46" "$(num 46.0)"
+assert_eq "num plain integer"         "42" "$(num 42)"
+assert_eq "num leading zero (octal)"  "8"  "$(num 08)"
+assert_eq "num empty → 0"             "0"  "$(num '')"
+assert_eq "num non-numeric → 0"       "0"  "$(num 'abc')"
+# An arithmetic-injection payload must be rendered inert (no $() survives)
+assert_eq "num neutralizes injection" "0"  "$(num 'x[$(touch /tmp/should-not-exist-$$)]')"
+[ ! -e "/tmp/should-not-exist-$$" ]; assert_eq "num did not execute payload" "0" "$?"
+
+# ── Unit tests: format_remaining ──────────────────────────────────────────────
+echo ""
+echo "=== Unit tests: format_remaining ==="
+assert_eq "format_remaining 0 → empty" ""      "$(format_remaining 0)"
+assert_eq "format_remaining 59s → <1m" "<1m"   "$(format_remaining 59)"
+assert_eq "format_remaining 90s → 1m"  "1m"    "$(format_remaining 90)"
+assert_eq "format_remaining 1h2m"      "1h2m"  "$(format_remaining 3720)"
+
 # ── Integration tests ─────────────────────────────────────────────────────────
 echo ""
 echo "=== Integration tests ==="
@@ -110,6 +133,21 @@ echo "=== Integration tests ==="
 run_statusline() {
     local json="$1"; shift
     echo "$json" | env "$@" CREDENTIALS_FILE=/dev/null bash "$STATUSLINE_SH" 2>/dev/null
+}
+
+# Portable helpers (GNU coreutils on Linux / BSD on macOS) so the suite is green
+# on both CI runners.
+touch_ago() {  # <minutes> <file> — set mtime N minutes in the past
+    local ts
+    ts=$(date -d "$1 minutes ago" '+%Y%m%d%H%M.%S' 2>/dev/null || date -v-"$1"M '+%Y%m%d%H%M.%S')
+    touch -t "$ts" "$2"
+}
+iso_in() {  # <±N hours> → UTC ISO 8601 with +00:00 offset, N hours from now
+    date -u -d "$1 hours" '+%Y-%m-%dT%H:%M:%S+00:00' 2>/dev/null \
+        || date -u -v"${1}"H '+%Y-%m-%dT%H:%M:%S+00:00'
+}
+epoch_in() {  # <±N hours> → Unix epoch seconds, N hours from now
+    date -d "$1 hours" +%s 2>/dev/null || date -v"${1}"H +%s
 }
 
 # Test 1 — model + context window
@@ -143,12 +181,13 @@ OUT=$(run_statusline '{"model":"claude-sonnet-4-6","context_window":{"used_perce
     USAGE_FILE="$USAGE_TMP" REFRESH_INTERVAL=999999 SHOW_WEEKLY=1)
 assert_contains "session 46%" "46%" "$OUT"
 assert_contains "week_all 59%" "59%" "$OUT"
+assert_not_contains "session pct has no decimal" "46.0" "$OUT"
 
 # Test 4 — API cache with ISO 8601 resets_at
 echo ""
 echo "-- Test 4: API cache with ISO 8601 --"
 USAGE_API=$(mktemp /tmp/test-usage-api-XXXX.json); TMPFILES+=("$USAGE_API")
-FUTURE=$(date -d "+3 hours" -Iseconds 2>/dev/null || date -v+3H -Iseconds 2>/dev/null)
+FUTURE=$(iso_in +3)
 cat > "$USAGE_API" <<JSON
 {"timestamp":"2026-02-21T10:00:00Z","source":"api","metrics":{"session":{"percent_used":35.0,"percent_remaining":65.0,"resets_at":"$FUTURE"},"week_all":{"percent_used":22.0,"percent_remaining":78.0,"resets_at":"2026-04-02T13:00:00+00:00"},"week_sonnet":{"percent_used":15.0,"percent_remaining":85.0,"resets_at":"2026-04-02T13:00:00+00:00"}}}
 JSON
@@ -157,14 +196,15 @@ OUT=$(run_statusline '{"model":"claude-sonnet-4-6","context_window":{"used_perce
 assert_contains "API session 35%" "35%" "$OUT"
 assert_contains "API week_all 22%" "22%" "$OUT"
 assert_contains "API sonnet 15%" "15%" "$OUT"
-assert_contains "has countdown" "h" "$OUT"
+# Anchor the countdown to the session block — a bare "h" also matches the week label
+assert_contains "session countdown present" "35% ↻" "$OUT"
 
 # Test 5 — Stale cache shows ⚠
 echo ""
 echo "-- Test 5: stale cache --"
 USAGE_STALE=$(mktemp /tmp/test-usage-stale-XXXX.json); TMPFILES+=("$USAGE_STALE")
 echo '{"timestamp":"2026-02-21T09:00:00+00:00","source":"api","metrics":{"session":{"percent_used":30.0,"percent_remaining":70.0,"resets_at":null}}}' > "$USAGE_STALE"
-touch -d '30 minutes ago' "$USAGE_STALE"
+touch_ago 30 "$USAGE_STALE"
 OUT=$(run_statusline '{"model":"claude-sonnet-4-6","context_window":{"used_percentage":0}}' \
     USAGE_FILE="$USAGE_STALE" REFRESH_INTERVAL=300)
 assert_contains "stale cache shows ⚠" "⚠" "$OUT"
@@ -181,7 +221,7 @@ assert_not_contains "fresh cache no ⚠" "⚠" "$OUT"
 # Test 7 — REFRESH_INTERVAL=0 never shows ⚠
 echo ""
 echo "-- Test 7: REFRESH_INTERVAL=0 no stale indicator --"
-touch -d '30 minutes ago' "$USAGE_STALE"
+touch_ago 30 "$USAGE_STALE"
 OUT=$(run_statusline '{"model":"claude-sonnet-4-6","context_window":{"used_percentage":0}}' \
     USAGE_FILE="$USAGE_STALE" REFRESH_INTERVAL=0)
 assert_not_contains "interval=0 no ⚠" "⚠" "$OUT"
@@ -284,6 +324,75 @@ echo "-- Test 19: Ctx label for 200k --"
 OUT=$(run_statusline '{"model":"claude-sonnet-4-6","context_window":{"used_percentage":30,"context_window_size":200000}}' \
     USAGE_FILE=/dev/null)
 assert_contains "Ctx label" "Ctx" "$OUT"
+
+# Test 20 — Native stdin rate_limits are preferred over the cache, and never stale
+echo ""
+echo "-- Test 20: native stdin rate_limits preferred --"
+USAGE_OLD=$(mktemp /tmp/test-usage-old-XXXX.json); TMPFILES+=("$USAGE_OLD")
+echo '{"source":"api","metrics":{"session":{"percent_used":88.0,"percent_remaining":12.0,"resets_at":null}}}' > "$USAGE_OLD"
+touch_ago 60 "$USAGE_OLD"   # stale cache that must be ignored
+FUTURE_EPOCH=$(epoch_in +2)
+OUT=$(run_statusline "{\"model\":\"claude-sonnet-4-6\",\"context_window\":{\"used_percentage\":0},\"rate_limits\":{\"five_hour\":{\"used_percentage\":12,\"resets_at\":$FUTURE_EPOCH}}}" \
+    USAGE_FILE="$USAGE_OLD" REFRESH_INTERVAL=300)
+assert_contains "uses stdin 12%" "12%" "$OUT"
+assert_not_contains "ignores cache 88%" "88%" "$OUT"
+assert_not_contains "stdin source never stale" "⚠" "$OUT"
+
+# Test 20b — stdin session WITHOUT resets_at keeps the live %, must not zero it
+OUT=$(run_statusline '{"model":"claude-sonnet-4-6","context_window":{"used_percentage":0},"rate_limits":{"five_hour":{"used_percentage":42}}}' \
+    USAGE_FILE=/dev/null REFRESH_INTERVAL=999999)
+assert_contains "stdin pct kept without resets_at" "⏳ 🟢 ▓▓▓░░░ 42%" "$OUT"
+assert_not_contains "session not zeroed without resets_at" "⏳ 🟢 ░░░░░░ 0%" "$OUT"
+
+# Test 21 — Session resets to 0% once resets_at is in the past
+echo ""
+echo "-- Test 21: session reset to 0% after window rolls over --"
+PAST_EPOCH=$(epoch_in -1)
+OUT=$(run_statusline "{\"model\":\"claude-sonnet-4-6\",\"context_window\":{\"used_percentage\":0},\"rate_limits\":{\"five_hour\":{\"used_percentage\":75,\"resets_at\":$PAST_EPOCH}}}" \
+    USAGE_FILE=/dev/null REFRESH_INTERVAL=999999)
+assert_not_contains "stale 75% suppressed" "75%" "$OUT"
+assert_contains "session shows 0% after reset" "⏳ 🟢 ░░░░░░ 0%" "$OUT"
+
+# Test 22 — SHOW_WEEKLY=0 (default) hides weekly data even when present in cache
+echo ""
+echo "-- Test 22: SHOW_WEEKLY=0 hides weekly --"
+USAGE_HIDE=$(mktemp /tmp/test-usage-hide-XXXX.json); TMPFILES+=("$USAGE_HIDE")
+echo '{"source":"api","metrics":{"session":{"percent_used":30.0,"resets_at":null},"week_all":{"percent_used":99.0,"resets_at":null}}}' > "$USAGE_HIDE"
+OUT=$(run_statusline '{"model":"claude-sonnet-4-6","context_window":{"used_percentage":0}}' \
+    USAGE_FILE="$USAGE_HIDE" REFRESH_INTERVAL=999999 SHOW_WEEKLY=0)
+assert_not_contains "weekly emoji hidden" "📅" "$OUT"
+assert_not_contains "week 99% hidden" "99%" "$OUT"
+
+# Test 23 — EFFORT_LABEL from settings.json
+echo ""
+echo "-- Test 23: effort label --"
+SETTINGS_TMP=$(mktemp /tmp/test-settings-XXXX.json); TMPFILES+=("$SETTINGS_TMP")
+echo '{"effortLevel":"max"}' > "$SETTINGS_TMP"
+OUT=$(run_statusline '{"model":"claude-sonnet-4-6","context_window":{"used_percentage":0}}' \
+    USAGE_FILE=/dev/null SETTINGS_FILE="$SETTINGS_TMP")
+assert_contains "effort max → /mx" "/mx" "$OUT"
+OUT=$(run_statusline '{"model":"claude-sonnet-4-6","context_window":{"used_percentage":0}}' \
+    USAGE_FILE=/dev/null SETTINGS_FILE=/dev/null)
+assert_not_contains "no effort suffix when absent" "Snt 4.6/" "$OUT"
+
+# Test 24 — Injection regression: malicious cache value must not execute
+echo ""
+echo "-- Test 24: arithmetic injection neutralized --"
+CANARY="/tmp/statusline-pwned-$$"; rm -f "$CANARY"
+USAGE_EVIL=$(mktemp /tmp/test-usage-evil-XXXX.json); TMPFILES+=("$USAGE_EVIL")
+printf '{"source":"api","metrics":{"session":{"percent_used":"x[$(touch %s)]","resets_at":null}}}' "$CANARY" > "$USAGE_EVIL"
+OUT=$(run_statusline '{"model":"claude-sonnet-4-6","context_window":{"used_percentage":42}}' \
+    USAGE_FILE="$USAGE_EVIL" REFRESH_INTERVAL=999999)
+[ ! -e "$CANARY" ]; assert_eq "payload did not execute" "0" "$?"
+rm -f "$CANARY"
+
+# Test 25 — Pipe in a field does not corrupt parsing (US-separator regression)
+echo ""
+echo "-- Test 25: pipe in model name stays intact --"
+OUT=$(run_statusline '{"model":{"display_name":"Foo|Bar"},"context_window":{"used_percentage":42},"cost":{"total_cost_usd":1.5}}' \
+    USAGE_FILE=/dev/null)
+assert_contains "ctx still 42%" "42%" "$OUT"
+assert_contains "cost still parsed" '$1.50' "$OUT"
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo ""
