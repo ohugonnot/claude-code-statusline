@@ -116,7 +116,7 @@ assert_eq "num empty → 0"             "0"  "$(num '')"
 assert_eq "num non-numeric → 0"       "0"  "$(num 'abc')"
 # An arithmetic-injection payload must be rendered inert (no $() survives)
 assert_eq "num neutralizes injection" "0"  "$(num 'x[$(touch /tmp/should-not-exist-$$)]')"
-[ ! -e "/tmp/should-not-exist-$$" ]; assert_eq "num did not execute payload" "0" "$?"
+[ ! -e "/tmp/should-not-exist-$$" ]; rc=$?; assert_eq "num did not execute payload" "0" "$rc"
 
 # ── Unit tests: format_remaining ──────────────────────────────────────────────
 echo ""
@@ -383,7 +383,7 @@ USAGE_EVIL=$(mktemp /tmp/test-usage-evil-XXXX.json); TMPFILES+=("$USAGE_EVIL")
 printf '{"source":"api","metrics":{"session":{"percent_used":"x[$(touch %s)]","resets_at":null}}}' "$CANARY" > "$USAGE_EVIL"
 OUT=$(run_statusline '{"model":"claude-sonnet-4-6","context_window":{"used_percentage":42}}' \
     USAGE_FILE="$USAGE_EVIL" REFRESH_INTERVAL=999999)
-[ ! -e "$CANARY" ]; assert_eq "payload did not execute" "0" "$?"
+[ ! -e "$CANARY" ]; rc=$?; assert_eq "payload did not execute" "0" "$rc"
 rm -f "$CANARY"
 
 # Test 25 — Pipe in a field does not corrupt parsing (US-separator regression)
