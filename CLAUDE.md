@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Real-time status line for Claude Code that displays rate limit usage, session cost, model, git branch, and context window in the IDE status bar. Fetches usage data via the Anthropic OAuth API on every render, caches results to JSON, and renders color-coded progress bars.
+Real-time status line for Claude Code that displays rate limit usage, session cost, model, git branch, and context window in the IDE status bar. Prefers the native `rate_limits` field Claude Code passes on stdin (≥2.1.x, Pro/Max); falls back to the undocumented Anthropic OAuth usage API (cached to JSON) when that field is absent or the Sonnet weekly quota is needed. Renders color-coded progress bars.
 
 **Stack**: Bash, jq, curl. No build step, no external test framework.
 
@@ -26,7 +26,7 @@ bash install.sh --refresh 120  # custom interval
 
 Three files, single-purpose each:
 
-- **statusline.sh** (core) — Claude Code status line hook. Reads JSON from stdin (model, context_window, workspace), outputs a formatted status string. Refreshes usage data via API when cache is stale.
+- **statusline.sh** (core) — Claude Code status line hook. Reads JSON from stdin (model, context_window, workspace, rate_limits), outputs a formatted status string. Uses native stdin `rate_limits` when present, else refreshes via API when cache is stale.
 - **install.sh** — Copies `statusline.sh` to `~/.claude/hooks/`, updates `~/.claude/settings.json`, checks/installs dependencies, cleans up old tmux scraper artifacts.
 - **test_statusline.sh** — Unit + integration tests with simple assert helpers (`assert_eq`, `assert_contains`, `assert_not_contains`).
 
@@ -34,17 +34,19 @@ Three files, single-purpose each:
 
 ```
 Claude Code → JSON stdin → statusline.sh → formatted status string
-                              ↓ (if cache > 60s old)
-                         curl → api.anthropic.com/api/oauth/usage → ~/.claude/usage-exact.json
+                              │  rate_limits in stdin?  ── yes ─→ use it (no network)
+                              └─ else / Sonnet quota ─→ curl → usage API → ~/.claude/usage-exact.json
 ```
 
 ### Key Design Decisions
 
-- **Inline API call**: Usage data is fetched via a single `curl` call (~200ms) — no background processes, no tmux, no python. Fast enough to run inline on every status line render when cache is stale.
-- **Atomic cache writes**: Uses `tmp + mv` to prevent partial reads of the cache file.
-- **Backward compatible**: Reads both the old tmux-scraped cache format (`resets` text) and the new API format (`resets_at` ISO 8601).
-- **Cross-platform**: GNU stat (Linux) vs BSD stat (macOS) detection in `file_mtime()`. Avoids `grep -P` (not available on macOS).
-- **Graceful degradation**: If the API call fails (expired token, network issue, endpoint removed), the script silently falls back to cached data or displays without usage info.
+- **Native stdin first**: `rate_limits.five_hour` / `.seven_day` (epoch `resets_at`) feed the session + weekly-all blocks with no network call. The API is hit only when the field is absent (older CC / non-subscriber) or for the Sonnet weekly quota (API-only). `NEED_API` gates the refresh; most renders make zero calls.
+- **Field parsing via US (0x1f) separator**: stdin/cache fields are joined with US (`\u001f`), not `|` — a `|` in a branch path or model name would shift every field. `IFS=$'\t'` is wrong here (tab is IFS-whitespace → empty fields collapse); US is non-whitespace so empties (absent rate_limits) survive.
+- **Arithmetic-injection guard (`num()`)**: every value reaching `$(( ))` or `[ -lt ]` is coerced to a bare integer first — a cache/stdin value like `x[$(cmd)]` would otherwise execute `cmd` via arithmetic array-subscript evaluation.
+- **Inline API call**: single `curl` (~200ms), atomic `mktemp + mv` write, `flock` so concurrent windows don't double-call. No background processes, no tmux, no python.
+- **Cross-platform**: GNU vs BSD `stat` in `file_mtime()`, GNU `date -d` with a BSD `date -j` fallback in `iso_to_epoch()`. Avoids `grep -P`.
+- **Graceful degradation**: token/network/endpoint failure → silently fall back to cached data, or render without usage bars.
+- **No legacy tmux cache parsing**: the v1 `resets`-text format is no longer parsed (it was GNU-only / broken on macOS). A v1 cache just shows no usage until the next API refresh repopulates it; `install.sh` still cleans up v1 artifacts.
 
 ### Usage API
 
@@ -69,9 +71,10 @@ Tracked upstream: [anthropics/claude-code#13585](https://github.com/anthropics/c
 | `SHOW_WEEKLY` | `0` | Set to `1` to show weekly + Sonnet quotas |
 | `USAGE_FILE` | `~/.claude/usage-exact.json` | Cache location |
 | `CREDENTIALS_FILE` | `~/.claude/.credentials.json` | OAuth token source |
+| `SETTINGS_FILE` | `~/.claude/settings.json` | Effort-level source (also used by tests) |
 
 ## Testing Patterns
 
-Tests extract `make_bar()` via awk and eval it for unit testing. Integration tests pipe JSON through `statusline.sh` with overridden env vars (`USAGE_FILE`, `REFRESH_INTERVAL`, `CREDENTIALS_FILE=/dev/null`) to control behavior without triggering the real API. Temp files are tracked in `TMPFILES` array and cleaned via trap.
+Unit tests source the helper section of `statusline.sh` (everything above the stdin read, via `sed`) so pure functions like `make_bar`, `num`, `format_remaining` can be called directly. Integration tests pipe JSON through `statusline.sh` with overridden env vars (`USAGE_FILE`, `REFRESH_INTERVAL`, `SETTINGS_FILE`, `CREDENTIALS_FILE=/dev/null`) to control behavior without triggering the real API. To exercise the native path, include a `rate_limits` object in the stdin JSON. Temp files are tracked in `TMPFILES` array and cleaned via trap.
 
 To add a test: create a temp JSON cache file, use `run_statusline` helper with appropriate env overrides, assert on stdout.

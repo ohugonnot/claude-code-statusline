@@ -8,9 +8,9 @@
 
 ## Why?
 
-Claude Code has rate limits but no built-in way to see them while you work. The `/usage` command exists, but you have to stop what you're doing to check it manually.
+Claude Code has rate limits but no built-in way to see them in the status bar. The `/usage` command exists, but you have to stop what you're doing to check it manually.
 
-This script **fetches your usage via API every 60 seconds** and displays the results directly in your status line — session rate limit with reset countdown, all at a glance.
+This script displays your usage directly in the status line — session rate limit with reset countdown, all at a glance. It reads the **`rate_limits` field Claude Code now passes on stdin** (no network call) when available, and falls back to the Anthropic usage API otherwise.
 
 ## What you get
 
@@ -38,21 +38,23 @@ With `SHOW_WEEKLY=1`:
 
 ```
 Claude Code → JSON stdin → statusline.sh → formatted status string
-                              ↓ (if cache > 60s old)
-                         curl → Anthropic OAuth API → ~/.claude/usage-exact.json
+                              │  rate_limits in stdin?  ── yes ─→ use it (no network)
+                              └─ no / Sonnet quota needed ─→ curl → usage API → cache
 ```
 
-Every 60 seconds (configurable), the script calls the Anthropic usage API with your OAuth token. The call takes ~200ms and runs inline — no background processes, no tmux, no scraping.
+**Preferred path (no network):** Claude Code ≥2.1.x passes `rate_limits.five_hour` and `.seven_day` directly on stdin for Pro/Max subscribers. The script uses these — session and weekly-all quotas with zero API calls.
+
+**Fallback path:** when the stdin field is absent (older Claude Code, not a Pro/Max plan), or when the per-model Sonnet weekly quota is requested (`SHOW_WEEKLY=1`, not in stdin), the script calls the Anthropic usage API with your OAuth token. The call takes ~200ms and runs inline (cached for `REFRESH_INTERVAL`, default 5 minutes) — no background processes, no tmux, no scraping.
 
 The OAuth token is read from `~/.claude/.credentials.json`, which Claude Code maintains automatically during active sessions. If the token is expired or the API is unreachable, the script silently falls back to cached data or displays without usage info.
 
 ### About the Usage API
 
-The script uses `https://api.anthropic.com/api/oauth/usage`, an **undocumented** Anthropic endpoint discovered by the community. It returns session (5h) and weekly (7d) quota utilization as percentages with ISO 8601 reset timestamps.
+The fallback uses `https://api.anthropic.com/api/oauth/usage`, an **undocumented** Anthropic endpoint discovered by the community. It returns session (5h) and weekly (7d) quota utilization as percentages with ISO 8601 reset timestamps, plus a Sonnet-only weekly figure not present in the stdin field.
 
 This is not an official API — it could change without notice. There's an open feature request for official programmatic access: [anthropics/claude-code#13585](https://github.com/anthropics/claude-code/issues/13585).
 
-If Anthropic removes this endpoint, the script degrades gracefully: you still get git, model, and context info — just no usage bars.
+If Anthropic removes this endpoint, the script still works for subscribers via the native stdin field, and otherwise degrades gracefully: you still get git, model, and context info — just no usage bars.
 
 ## Install
 
@@ -61,6 +63,8 @@ If Anthropic removes this endpoint, the script degrades gracefully: you still ge
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ohugonnot/claude-code-statusline/main/install.sh | bash
 ```
+
+> Piping a remote script straight into `bash` runs whatever the server returns. If you'd rather inspect first, read it (`curl -fsSL …/install.sh | less`) or use the **Manual** clone-and-run path below.
 
 With custom refresh interval (e.g. every 2 minutes):
 
@@ -106,6 +110,7 @@ Export in your shell profile or edit the top of `statusline.sh`:
 | `TIMEZONE` | *(system default)* | Override display timezone (e.g. `America/New_York`) |
 | `USAGE_FILE` | `~/.claude/usage-exact.json` | Cache file path |
 | `CREDENTIALS_FILE` | `~/.claude/.credentials.json` | OAuth credentials path |
+| `SETTINGS_FILE` | `~/.claude/settings.json` | Source for the effort-level suffix |
 
 ## Testing
 
@@ -118,7 +123,7 @@ bash test_statusline.sh
 **Usage display frozen / not updating?**
 You may have been rate-limited by the Anthropic API (e.g. `REFRESH_INTERVAL` was too low or set to `0`). Wait a few minutes, then test the API directly — a `rate_limit_error` response confirms it. Once the rate limit clears, the statusline resumes auto-updating.
 
-> **Multiple Claude Code windows?** All windows share the same cache file (`~/.claude/usage-exact.json`). Whichever window renders first past the 60s mark will call the API and refresh the cache for all others. You won't get multiple simultaneous API calls from the same machine.
+> **Multiple Claude Code windows?** When the API fallback is in use, all windows share the same cache file (`~/.claude/usage-exact.json`). Whichever window renders first past the `REFRESH_INTERVAL` mark calls the API and refreshes the cache for all others (guarded by a `flock`), so you won't get multiple simultaneous API calls from the same machine. When the native stdin field is available, no API calls happen at all.
 
 **Usage bars missing?**
 Check that `~/.claude/.credentials.json` exists and contains a valid `claudeAiOauth.accessToken`. This file is created automatically when you log into Claude Code.
