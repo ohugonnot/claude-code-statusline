@@ -63,8 +63,10 @@ echo ""
 echo "=== Unit tests: make_bar ==="
 
 # Source every helper (config + functions) up to the stdin read — robust against
-# refactors, unlike extracting a single function by name with awk.
-source <(sed '/^# ── Read JSON input from stdin/,$d' "$STATUSLINE_SH")
+# refactors, unlike extracting a single function by name with awk. LC_ALL=C and
+# an ASCII sentinel keep BSD sed (macOS) from aborting on the file's UTF-8
+# box-drawing chars under a C-locale CI runner ("illegal byte sequence").
+source <(LC_ALL=C sed '/^JSON=/,$d' "$STATUSLINE_SH")
 
 run_make_bar() {
     BAR_STR=""; BAR_COLOR=""
