@@ -63,10 +63,13 @@ echo ""
 echo "=== Unit tests: make_bar ==="
 
 # Source every helper (config + functions) up to the stdin read — robust against
-# refactors, unlike extracting a single function by name with awk. LC_ALL=C and
-# an ASCII sentinel keep BSD sed (macOS) from aborting on the file's UTF-8
-# box-drawing chars under a C-locale CI runner ("illegal byte sequence").
-source <(LC_ALL=C sed '/^JSON=/,$d' "$STATUSLINE_SH")
+# refactors, unlike extracting a single function by name with awk. Extract to a
+# real file then source it: `source <(...)` process substitution is flaky on the
+# bash 3.2 shipped with macOS (broken pipe, helpers left undefined).
+HELPERS_TMP=$(mktemp /tmp/sl-helpers-XXXXXX); TMPFILES+=("$HELPERS_TMP")
+sed '/^JSON=/,$d' "$STATUSLINE_SH" > "$HELPERS_TMP"
+# shellcheck source=/dev/null
+source "$HELPERS_TMP"
 
 run_make_bar() {
     BAR_STR=""; BAR_COLOR=""
