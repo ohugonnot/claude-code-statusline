@@ -8,7 +8,10 @@ set -euo pipefail
 CUSTOM_REFRESH=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --refresh) CUSTOM_REFRESH="$2"; shift 2 ;;
+        --refresh)
+            CUSTOM_REFRESH="${2:?--refresh requires a value (seconds)}"
+            [[ "$CUSTOM_REFRESH" =~ ^[0-9]+$ ]] || { echo "  --refresh must be a number of seconds" >&2; exit 1; }
+            shift 2 ;;
         *) shift ;;
     esac
 done
@@ -80,7 +83,7 @@ echo "  Installed: $HOOKS_DIR/statusline.sh"
 echo ""
 echo "Cleaning up old tmux scraper artifacts..."
 rm -f /tmp/claude-usage-refresh.lock /tmp/.claude-usage-scraper.sh /tmp/.claude-usage-raw.txt
-tmux kill-session -t claude-usage-bg 2>/dev/null && echo "  Killed old tmux scraper session" || true
+if tmux kill-session -t claude-usage-bg 2>/dev/null; then echo "  Killed old tmux scraper session"; fi
 echo "  Done"
 
 # 4. Update settings.json
