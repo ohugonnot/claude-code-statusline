@@ -77,8 +77,9 @@ run_make_bar() {
 }
 
 count_char() {
-    local char="$1" str="$2"
-    echo -n "$str" | grep -o "$char" | wc -l
+    local char="$1" str="$2" n
+    n=$(echo -n "$str" | grep -o "$char" | wc -l)
+    echo "$((n))"   # $(()) strips the leading whitespace BSD wc -l pads with
 }
 
 # pct=0 → 6 empty blocks
