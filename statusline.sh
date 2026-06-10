@@ -14,6 +14,7 @@ REFRESH_INTERVAL="${REFRESH_INTERVAL:-300}"           # seconds between API call
 SHOW_WEEKLY="${SHOW_WEEKLY:-0}"                      # set to 1 to show weekly + sonnet quotas
 USAGE_FILE="${USAGE_FILE:-$HOME/.claude/usage-exact.json}"
 CREDENTIALS_FILE="${CREDENTIALS_FILE:-$HOME/.claude/.credentials.json}"
+SETTINGS_FILE="${SETTINGS_FILE:-$HOME/.claude/settings.json}"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 tz_date() {
@@ -136,10 +137,11 @@ case "$MODEL" in
   claude-opus-4-5*|Opus\ 4.5*)     MODEL="Opus 4.5" ;;
   claude-haiku-4*|Haiku\ 4*)       MODEL="Haiku 4"  ;;
 esac
+# strip control bytes — model name comes from untrusted JSON (terminal OSC injection)
+MODEL="${MODEL//[$'\x01'-$'\x1f'$'\x7f']/}"
 
 # ── Effort level (from settings.json — not yet in stdin JSON) ────────────────
 EFFORT_LABEL=""
-SETTINGS_FILE="${SETTINGS_FILE:-$HOME/.claude/settings.json}"
 if [ -f "$SETTINGS_FILE" ]; then
     case "$(jq -r '.effortLevel // empty' "$SETTINGS_FILE" 2>/dev/null)" in
         low)    EFFORT_LABEL="lo" ;;
@@ -159,7 +161,7 @@ CTX_COLOR="$BAR_COLOR" CTX_BAR="$BAR_STR"
 
 # ── Session cost + duration ───────────────────────────────────────────────────
 COST_STR="" DURATION_STR=""
-if [[ "$J_COST" =~ ^[0-9]+(\.[0-9]+)?$ ]] && [ "$J_COST" != "0" ]; then
+if [[ "$J_COST" =~ ^[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$ ]] && [ "$J_COST" != "0" ]; then
     COST_STR=$(printf '$%.2f' "$J_COST" 2>/dev/null)
 fi
 if [ -n "$J_DURATION" ] && [ "$J_DURATION" != "0" ] && [ "$J_DURATION" != "null" ]; then

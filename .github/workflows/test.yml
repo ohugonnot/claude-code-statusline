@@ -17,6 +17,8 @@ jobs:
         run: |
           if [ "$RUNNER_OS" = "macOS" ]; then brew install jq shellcheck; else sudo apt-get update && sudo apt-get install -y jq shellcheck; fi
       - name: ShellCheck
-        run: shellcheck statusline.sh install.sh test_statusline.sh
+        run: shellcheck statusline.sh install.sh test_statusline.sh test_install.sh
       - name: Run tests
         run: bash test_statusline.sh
+      - name: Run install tests
+        run: bash test_install.sh

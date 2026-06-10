@@ -409,6 +409,63 @@ OUT=$(run_statusline '{"model":{"display_name":"Foo|Bar"},"context_window":{"use
 assert_contains "ctx still 42%" "42%" "$OUT"
 assert_contains "cost still parsed" '$1.50' "$OUT"
 
+# Test 26 — Effort levels: low, medium, high
+echo ""
+echo "-- Test 26: effort levels low/medium/high --"
+SETTINGS_EFFORT=$(mktemp /tmp/test-settings-effort-XXXX.json); TMPFILES+=("$SETTINGS_EFFORT")
+echo '{"effortLevel":"low"}' > "$SETTINGS_EFFORT"
+OUT=$(run_statusline '{"model":"claude-sonnet-4-6","context_window":{"used_percentage":0}}' \
+    USAGE_FILE=/dev/null SETTINGS_FILE="$SETTINGS_EFFORT")
+assert_contains "effort low → /lo" "/lo" "$OUT"
+
+echo '{"effortLevel":"medium"}' > "$SETTINGS_EFFORT"
+OUT=$(run_statusline '{"model":"claude-sonnet-4-6","context_window":{"used_percentage":0}}' \
+    USAGE_FILE=/dev/null SETTINGS_FILE="$SETTINGS_EFFORT")
+assert_contains "effort medium → /md" "/md" "$OUT"
+
+echo '{"effortLevel":"high"}' > "$SETTINGS_EFFORT"
+OUT=$(run_statusline '{"model":"claude-sonnet-4-6","context_window":{"used_percentage":0}}' \
+    USAGE_FILE=/dev/null SETTINGS_FILE="$SETTINGS_EFFORT")
+assert_contains "effort high → /hi" "/hi" "$OUT"
+
+# Test 27 — OSC injection: ESC bytes stripped from model name
+echo ""
+echo "-- Test 27: OSC injection stripped --"
+# Write the JSON to a file so the shell never handles the raw ESC byte.
+# \u001b is the valid JSON encoding of ESC; jq -r decodes it to a real byte.
+OSC_TMP=$(mktemp /tmp/test-osc-XXXX.json); TMPFILES+=("$OSC_TMP")
+printf '%s' '{"model":{"display_name":"\u001b]0;PWNED\u0007"},"context_window":{"used_percentage":42}}' > "$OSC_TMP"
+OUT=$(CREDENTIALS_FILE=/dev/null USAGE_FILE=/dev/null bash "$STATUSLINE_SH" < "$OSC_TMP" 2>/dev/null)
+ESC_BYTE=$(printf '\x1b')
+assert_not_contains "no ESC byte in output" "$ESC_BYTE" "$OUT"
+assert_contains "context pct still rendered" "42%" "$OUT"
+# Test 28 — stdin rate_limits.seven_day with SHOW_WEEKLY=1
+echo ""
+echo "-- Test 28: stdin seven_day with SHOW_WEEKLY=1 --"
+FUTURE_EPOCH_W=$(epoch_in +5)
+OUT=$(run_statusline "{\"model\":\"claude-sonnet-4-6\",\"context_window\":{\"used_percentage\":0},\"rate_limits\":{\"five_hour\":{\"used_percentage\":10},\"seven_day\":{\"used_percentage\":37,\"resets_at\":$FUTURE_EPOCH_W}}}" \
+    USAGE_FILE=/dev/null SHOW_WEEKLY=1)
+assert_contains "weekly 📅 present" "📅" "$OUT"
+assert_contains "seven_day 37% shown" "37%" "$OUT"
+
+# Test 29 — Staleness boundary: 3× REFRESH_INTERVAL
+echo ""
+echo "-- Test 29: staleness boundary (3× REFRESH_INTERVAL) --"
+USAGE_BOUNDARY=$(mktemp /tmp/test-usage-boundary-XXXX.json); TMPFILES+=("$USAGE_BOUNDARY")
+echo '{"source":"api","metrics":{"session":{"percent_used":55.0,"resets_at":null}}}' > "$USAGE_BOUNDARY"
+
+# 960s ago with REFRESH_INTERVAL=300 → 960 > 300*3=900 → stale
+touch_ago 16 "$USAGE_BOUNDARY"   # 16 minutes = 960 seconds
+OUT=$(run_statusline '{"model":"claude-sonnet-4-6","context_window":{"used_percentage":0}}' \
+    USAGE_FILE="$USAGE_BOUNDARY" REFRESH_INTERVAL=300)
+assert_contains "960s cache is stale (⚠)" "⚠" "$OUT"
+
+# 840s ago with REFRESH_INTERVAL=300 → 840 < 900 → not stale
+touch_ago 14 "$USAGE_BOUNDARY"   # 14 minutes = 840 seconds
+OUT=$(run_statusline '{"model":"claude-sonnet-4-6","context_window":{"used_percentage":0}}' \
+    USAGE_FILE="$USAGE_BOUNDARY" REFRESH_INTERVAL=300)
+assert_not_contains "840s cache is not stale" "⚠" "$OUT"
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

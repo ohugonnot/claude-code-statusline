@@ -1,5 +1,7 @@
 # claude-code-statusline
 
+![test](https://github.com/ohugonnot/claude-code-statusline/actions/workflows/test.yml/badge.svg) ![MIT](https://img.shields.io/badge/License-MIT-blue.svg)
+
 **Know your Claude Code rate limits in real time.** No more guessing when your session or weekly quota resets — see your actual usage data live in the status bar.
 
 ```
@@ -14,7 +16,7 @@ This script displays your usage directly in the status line — session rate lim
 
 ## What you get
 
-Color-coded progress bars: 🟢 under 50% │ 🟡 50-80% │ 🔴 over 80%
+Color-coded progress bars: 🟢 under 50% │ 🟡 50-80% │ 🔴 80% and above
 
 | Segment | Example | Description |
 |---------|---------|-------------|
@@ -86,9 +88,12 @@ bash install.sh
 mkdir -p ~/.claude/hooks
 cp statusline.sh ~/.claude/hooks/statusline.sh
 chmod +x ~/.claude/hooks/statusline.sh
+```
 
-# Add this key to ~/.claude/settings.json:
-# "statusLine": { "type": "command", "command": "bash ~/.claude/hooks/statusline.sh" }
+Merge this key into your existing `~/.claude/settings.json` (create the file if it doesn't exist):
+
+```json
+{"statusLine": {"type": "command", "command": "bash ~/.claude/hooks/statusline.sh"}}
 ```
 
 ## Requirements
@@ -97,7 +102,7 @@ chmod +x ~/.claude/hooks/statusline.sh
 - `bash`, `jq`, `curl` (no tmux, no python)
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI installed
 
-> **Migrating from v1?** The old tmux+python scraper is no longer needed. Run `install.sh` to upgrade — it will clean up old tmux sessions and lock files automatically.
+> **Migrating from the tmux scraper (pre-v1.3)?** The old tmux+python scraper is no longer needed. Run `install.sh` to upgrade — it will clean up old tmux sessions and lock files automatically.
 
 ## Configuration
 
@@ -146,7 +151,7 @@ curl -s "https://api.anthropic.com/api/oauth/usage" \
   -H "anthropic-beta: oauth-2025-04-20" | jq .
 ```
 
-**Migrating from v1 (tmux scraper)?**
+**Migrating from the tmux scraper (pre-v1.3)?**
 Run `install.sh` — it cleans up old artifacts automatically. Or manually:
 ```bash
 rm -f /tmp/claude-usage-refresh.lock /tmp/.claude-usage-scraper.sh

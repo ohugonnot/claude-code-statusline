@@ -93,18 +93,21 @@ echo "Configuring Claude Code..."
 STATUS_LINE_CONFIG='{"type":"command","command":"bash ~/.claude/hooks/statusline.sh"}'
 
 if [ -f "$SETTINGS_FILE" ]; then
+    if ! jq empty "$SETTINGS_FILE" 2>/dev/null; then
+        echo "  settings.json is not valid JSON — fix it manually, statusLine not configured" >&2
+        exit 1
+    fi
     tmp="$(mktemp)"
     jq --argjson sl "$STATUS_LINE_CONFIG" '
       .statusLine = $sl |
       # Remove old SessionStart hook for statusline if present
-      if .hooks.SessionStart then
+      if (.hooks.SessionStart | type) == "array" then
         .hooks.SessionStart = [.hooks.SessionStart[] | select(.hooks[0].command != "bash ~/.claude/hooks/statusline.sh < /dev/null")]
       else . end |
       # Clean up empty SessionStart array
       if .hooks.SessionStart == [] then del(.hooks.SessionStart) else . end |
       if .hooks == {} then del(.hooks) else . end
-    ' "$SETTINGS_FILE" > "$tmp"
-    mv "$tmp" "$SETTINGS_FILE"
+    ' "$SETTINGS_FILE" > "$tmp" && mv "$tmp" "$SETTINGS_FILE"
     echo "  Updated statusLine in existing settings.json"
 else
     mkdir -p "$(dirname "$SETTINGS_FILE")"
