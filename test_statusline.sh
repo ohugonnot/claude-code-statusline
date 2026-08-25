@@ -466,6 +466,33 @@ OUT=$(run_statusline '{"model":"claude-sonnet-4-6","context_window":{"used_perce
     USAGE_FILE="$USAGE_BOUNDARY" REFRESH_INTERVAL=300)
 assert_not_contains "840s cache is not stale" "⚠" "$OUT"
 
+# Test 30 — Effort level from stdin
+echo ""
+echo "-- Test 30: effort level from stdin --"
+SETTINGS_STALE=$(mktemp /tmp/test-settings-stale-XXXX.json); TMPFILES+=("$SETTINGS_STALE")
+echo '{"effortLevel":"low"}' > "$SETTINGS_STALE"
+
+# stdin carries the live level and must win over the configured default
+OUT=$(run_statusline '{"model":"claude-sonnet-4-6","context_window":{"used_percentage":0},"effort":{"level":"high"}}' \
+    USAGE_FILE=/dev/null SETTINGS_FILE="$SETTINGS_STALE")
+assert_contains "stdin high wins over settings.json low" "/hi" "$OUT"
+assert_not_contains "stale settings level not shown" "/lo" "$OUT"
+
+# xhigh is a real level (ultracode reports as xhigh)
+OUT=$(run_statusline '{"model":"claude-sonnet-4-6","context_window":{"used_percentage":0},"effort":{"level":"xhigh"}}' \
+    USAGE_FILE=/dev/null SETTINGS_FILE=/dev/null)
+assert_contains "effort xhigh → /xh" "/xh" "$OUT"
+
+# No effort on stdin: settings.json is still the fallback
+OUT=$(run_statusline '{"model":"claude-sonnet-4-6","context_window":{"used_percentage":0}}' \
+    USAGE_FILE=/dev/null SETTINGS_FILE="$SETTINGS_STALE")
+assert_contains "settings.json still the fallback" "/lo" "$OUT"
+
+# Unknown level: no label rather than a bogus one
+OUT=$(run_statusline '{"model":"claude-sonnet-4-6","context_window":{"used_percentage":0},"effort":{"level":"turbo"}}' \
+    USAGE_FILE=/dev/null SETTINGS_FILE=/dev/null)
+assert_not_contains "unknown level appends nothing to the model" "4.6/" "$OUT"
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
