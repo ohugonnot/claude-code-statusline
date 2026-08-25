@@ -25,6 +25,8 @@ Color-coded progress bars: 🟢 under 50% │ 🟡 50-80% │ 🔴 80% and above
 | **Context** | `🟢 Ctx ▓▓▓░░░ 42%` | Context window fill. Shows `1M` for 1M context |
 | **Session** | `⏳ 🟡 ▓▓░░░░ 35% ↻ 2h30m` | 5-hour session quota + countdown to reset |
 | **Cost** | `$0.42 ⏱ 1h4m` | Session cost + wall-clock duration |
+| **Burn rate** | `6.8k/min` | Tokens per minute, opt-in via `SHOW_BURN_RATE=1` |
+| **Sessions** | `×3` | Concurrently active sessions, opt-in via `SHOW_SESSIONS=1` |
 
 With `SHOW_WEEKLY=1`:
 
@@ -116,11 +118,45 @@ Export in your shell profile or edit the top of `statusline.sh`:
 | `USAGE_FILE` | `~/.claude/usage-exact.json` | Cache file path |
 | `CREDENTIALS_FILE` | `~/.claude/.credentials.json` | OAuth credentials path |
 | `SETTINGS_FILE` | `~/.claude/settings.json` | Source for the effort-level suffix |
+| `SHOW_SONNET` | `1` | Set to `0` to never call the usage API for the Sonnet-only quota. With both windows on stdin, the script then makes no network call and never reads the credentials file |
+
+### Style and segments
+
+`STATUSLINE_STYLE=plain` renders the same data without emoji: labelled quotas, wider
+bars, a dim pipe separator, and the reset as its own clock segment. The emoji style
+remains the default.
+
+```
+my-project | main★ | Opus 4.6/mx | 194k/1000k [██░░░░░░░░] | 5h [█████░░░░░] 47% | 7d [█████████░] 84% | 17:34/19:45 (2h11m) | 6.8k/min | ×3 | $0.42 1h4m
+```
+
+| Variable | Default | Description |
+|---|---|---|
+| `STATUSLINE_STYLE` | `emoji` | `plain` drops every emoji for an ANSI-colored line |
+| `BAR_BLOCKS` | `6` emoji / `10` plain | Bar width in blocks |
+| `SHOW_DIR` | `0` | Set to `1` to prefix the line with the project directory name |
+| `SHOW_BRANCH` | `1` | Set to `0` to hide the git branch |
+| `SHOW_MODEL` | `1` | Set to `0` to hide the model and effort level |
+| `SHOW_COST` | `1` | Set to `0` to hide session cost and duration |
+| `SHOW_CONTEXT_TOKENS` | `0` | Set to `1` to render context as `194k/1000k` instead of a percentage |
+| `SHOW_BURN_RATE` | `0` | Set to `1` to show tokens/min over the last `BURN_WINDOW_MIN` |
+| `SHOW_SESSIONS` | `0` | Set to `1` to show the count of concurrently active sessions |
+| `BURN_WINDOW_MIN` | `10` | Window, in minutes, the burn rate averages over |
+| `SESSION_ACTIVE_MIN` | `5` | A session counts as active if its transcript changed within this many minutes |
+| `PROJECTS_DIR` | `~/.claude/projects` | Where transcripts live, for the burn rate and session count |
+
+The burn rate reads the transcript and deduplicates on `message.id`, since each
+assistant message is logged more than once and summing the raw lines inflates the
+rate. It counts input, cache creation and output tokens, and excludes cache reads:
+at tens of thousands of tokens per turn those would drown out any signal about
+actual activity.
 
 ## Testing
 
 ```bash
-bash test_statusline.sh
+bash test_statusline.sh   # core behavior
+bash test_ports.sh        # plain style and the opt-in segments
+bash test_install.sh      # installer
 ```
 
 ## Troubleshooting

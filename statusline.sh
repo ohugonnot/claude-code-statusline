@@ -16,6 +16,34 @@ USAGE_FILE="${USAGE_FILE:-$HOME/.claude/usage-exact.json}"
 CREDENTIALS_FILE="${CREDENTIALS_FILE:-$HOME/.claude/.credentials.json}"
 SETTINGS_FILE="${SETTINGS_FILE:-$HOME/.claude/settings.json}"
 
+# ── Style and optional sections ───────────────────────────────────────────────
+# "emoji" is the upstream rendering. "plain" drops every emoji for an ANSI-colored
+# line: wider bars, a dim pipe separator, and the reset clock as its own segment.
+STATUSLINE_STYLE="${STATUSLINE_STYLE:-emoji}"        # emoji | plain
+BAR_BLOCKS="${BAR_BLOCKS:-}"                          # bar width; default 6 (emoji) / 10 (plain)
+SHOW_SONNET="${SHOW_SONNET:-1}"                       # 0 = never call the usage API for the Sonnet-only quota
+SHOW_DIR="${SHOW_DIR:-0}"                             # 1 = leading project directory name
+SHOW_BRANCH="${SHOW_BRANCH:-1}"                       # 0 = hide the git branch
+SHOW_MODEL="${SHOW_MODEL:-1}"                         # 0 = hide model + effort
+SHOW_COST="${SHOW_COST:-1}"                           # 0 = hide session cost + duration
+SHOW_CONTEXT_TOKENS="${SHOW_CONTEXT_TOKENS:-0}"       # 1 = "168k/1000k" alongside the context bar
+SHOW_BURN_RATE="${SHOW_BURN_RATE:-0}"                 # 1 = tokens/min over the last BURN_WINDOW_MIN
+SHOW_SESSIONS="${SHOW_SESSIONS:-0}"                   # 1 = count of concurrently active sessions
+BURN_WINDOW_MIN="${BURN_WINDOW_MIN:-10}"
+SESSION_ACTIVE_MIN="${SESSION_ACTIVE_MIN:-5}"
+PROJECTS_DIR="${PROJECTS_DIR:-$HOME/.claude/projects}"
+
+if [ -z "$BAR_BLOCKS" ]; then
+    if [ "$STATUSLINE_STYLE" = "plain" ]; then BAR_BLOCKS=10; else BAR_BLOCKS=6; fi
+fi
+[[ "$BAR_BLOCKS" =~ ^[1-9][0-9]?$ ]] || BAR_BLOCKS=6
+
+# ANSI palette, used by the "plain" style only
+C_RESET=$'\033[0m'   C_DIM=$'\033[2m'
+C_DIR=$'\033[1;93m'  C_CTX=$'\033[2;38;5;225m'
+C_GREEN=$'\033[38;5;194m' C_ORANGE=$'\033[38;5;208m' C_RED=$'\033[31m'
+C_TIMER=$'\033[35m'  C_CYAN=$'\033[96m'
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 tz_date() {
     local tz="$1"; shift
@@ -69,19 +97,32 @@ num() {
     echo "$(( 10#${v:-0} ))"   # 10# forces base 10 — a leading zero would be read as octal
 }
 
-# make_bar <percent> → sets BAR_COLOR and BAR_STR (6-block bar)
+# make_bar <percent> → sets BAR_COLOR and BAR_STR (BAR_BLOCKS wide)
+# The step is ceil(100/blocks), so any non-zero percentage lights the first block.
+# At BAR_BLOCKS=6 the step is 17 and the arithmetic is identical to the original.
+# BAR_COLOR carries the emoji dot in emoji style, an ANSI code in plain style.
 make_bar() {
     local pct; pct="$(num "$1")"
     [ "$pct" -gt 100 ] && pct=100
-    local filled=$(( (pct + 16) / 17 )); [ $filled -gt 6 ] && filled=6   # 17 = ceil(100/6): round onto 6 blocks
-    local empty=$(( 6 - filled ))
+    local step=$(( (100 + BAR_BLOCKS - 1) / BAR_BLOCKS ))
+    local filled=$(( (pct + step - 1) / step )); [ $filled -gt "$BAR_BLOCKS" ] && filled=$BAR_BLOCKS
+    local empty=$(( BAR_BLOCKS - filled ))
+    local fill_glyph="▓"
+    [ "$STATUSLINE_STYLE" = "plain" ] && fill_glyph="█"
     BAR_STR=""
     local i
-    for ((i=0; i<filled; i++)); do BAR_STR+="▓"; done
+    for ((i=0; i<filled; i++)); do BAR_STR+="$fill_glyph"; done
     for ((i=0; i<empty;  i++)); do BAR_STR+="░"; done
-    if   [ "$pct" -lt 50 ]; then BAR_COLOR="🟢"
-    elif [ "$pct" -lt 80 ]; then BAR_COLOR="🟡"
-    else                         BAR_COLOR="🔴"
+    if [ "$STATUSLINE_STYLE" = "plain" ]; then
+        if   [ "$pct" -lt 50 ]; then BAR_COLOR="$C_GREEN"
+        elif [ "$pct" -lt 80 ]; then BAR_COLOR="$C_ORANGE"
+        else                         BAR_COLOR="$C_RED"
+        fi
+    else
+        if   [ "$pct" -lt 50 ]; then BAR_COLOR="🟢"
+        elif [ "$pct" -lt 80 ]; then BAR_COLOR="🟡"
+        else                         BAR_COLOR="🔴"
+        fi
     fi
 }
 
@@ -102,6 +143,54 @@ render_quota() {
     echo "$out"
 }
 
+# render_quota_plain <label> <percent> <reset_epoch> → "label [bar] pct%".
+# Same rollover rule as render_quota: a reset already in the past means the window
+# rolled over, so the percentage is back to 0. The countdown is not appended here —
+# the plain style renders the clock as its own segment.
+render_quota_plain() {
+    local label="$1" reset="$3" pct
+    pct="$(num "$2")"
+    if [ -n "$reset" ] && [ "$reset" -le "$NOW" ] 2>/dev/null; then pct=0; fi
+    make_bar "$pct"
+    printf '%s%s [%s] %s%%%s' "$BAR_COLOR" "$label" "$BAR_STR" "$pct" "$C_RESET"
+}
+
+# tokens/min over the last <window> minutes of a transcript.
+# Deduplicated on message.id: the transcript logs each assistant message two or
+# three times, so summing the raw lines would inflate the rate by that factor.
+# Counts input + cache_creation + output and excludes cache_read, which runs to
+# ~190k tokens per turn here and would drown out any signal about real activity.
+# Divides by the full window rather than the observed span, which keeps the number
+# steady instead of spiking on a single burst.
+burn_rate_per_min() {
+    local transcript="$1" window_min="$2" cutoff
+    [ -f "$transcript" ] || return 1
+    cutoff=$(( $(date +%s) - window_min * 60 ))
+    tail -n 400 "$transcript" 2>/dev/null | jq -s -r \
+        --argjson cutoff "$cutoff" --argjson win "$window_min" '
+        [ .[]
+          | select(type == "object" and .type == "assistant"
+                   and (.message.usage != null) and (.timestamp != null))
+          | { id: (.message.id // .uuid // "?"),
+              ts: (.timestamp | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601? // 0),
+              tok: (((.message.usage.input_tokens // 0)
+                     + (.message.usage.cache_creation_input_tokens // 0)
+                     + (.message.usage.output_tokens // 0))) }
+          | select(.ts >= $cutoff) ]
+        | unique_by(.id)
+        | if length == 0 then empty else ((map(.tok) | add) / $win | floor) end
+    ' 2>/dev/null
+}
+
+# Sessions with transcript activity in the last <minutes>, counted one per project
+# directory so several transcripts of the same project do not count twice.
+count_active_sessions() {
+    local dir="$1" minutes="$2"
+    [ -d "$dir" ] || return 1
+    find "$dir" -name '*.jsonl' -type f -mmin "-$minutes" 2>/dev/null \
+        | sed 's|/[^/]*$||' | sort -u | wc -l | tr -d ' '
+}
+
 # ── Read JSON input from stdin ────────────────────────────────────────────────
 JSON=$(cat)
 
@@ -111,7 +200,7 @@ JSON=$(cat)
 # rate_limits). rate_limits.* is native since Claude Code 2.1.x (Pro/Max) —
 # preferred over the API call when present.
 IFS=$'\x1f' read -r J_MODEL_DISPLAY J_MODEL_RAW J_CTX_PCT J_CTX_SIZE J_COST J_DURATION J_CWD \
-    J_RL_5H_PCT J_RL_5H_RESET J_RL_7D_PCT J_RL_7D_RESET \
+    J_RL_5H_PCT J_RL_5H_RESET J_RL_7D_PCT J_RL_7D_RESET J_CTX_TOKENS J_TRANSCRIPT \
     < <(echo "$JSON" | jq -r '[
         (if .model | type == "object" then .model.display_name // "" else "" end),
         (if .model | type == "string" then .model else "" end),
@@ -123,7 +212,9 @@ IFS=$'\x1f' read -r J_MODEL_DISPLAY J_MODEL_RAW J_CTX_PCT J_CTX_SIZE J_COST J_DU
         (.rate_limits.five_hour.used_percentage // ""),
         (.rate_limits.five_hour.resets_at // ""),
         (.rate_limits.seven_day.used_percentage // ""),
-        (.rate_limits.seven_day.resets_at // "")
+        (.rate_limits.seven_day.resets_at // ""),
+        (.context_window.total_input_tokens // 0),
+        (.transcript_path // "")
     ] | join("\u001f")' 2>/dev/null)
 
 # ── Model ─────────────────────────────────────────────────────────────────────
@@ -230,7 +321,16 @@ refresh_usage_api() {
 HAVE_STDIN_SESSION=0
 [ -n "$J_RL_5H_PCT" ] && [ "$J_RL_5H_PCT" != "null" ] && HAVE_STDIN_SESSION=1
 NEED_API=1
-[ "$HAVE_STDIN_SESSION" = 1 ] && [ "$SHOW_WEEKLY" != "1" ] && NEED_API=0
+if [ "$HAVE_STDIN_SESSION" = 1 ]; then
+    if [ "$SHOW_WEEKLY" != "1" ]; then
+        NEED_API=0
+    elif [ "$SHOW_SONNET" != "1" ] && [ -n "$J_RL_7D_PCT" ] && [ "$J_RL_7D_PCT" != "null" ]; then
+        # stdin already carries both windows and the Sonnet-only quota was not asked
+        # for, so there is nothing left to fetch: no network call, and no read of the
+        # credentials file either.
+        NEED_API=0
+    fi
+fi
 
 [[ "$REFRESH_INTERVAL" =~ ^[0-9]+$ ]] || REFRESH_INTERVAL=300
 
@@ -327,27 +427,108 @@ if [ "$IS_STALE" = 1 ] && [ -n "$BLOCK_DISPLAY" ]; then
     BLOCK_DISPLAY="${BLOCK_DISPLAY/🔴/⚠}"
 fi
 
+# ── Optional ported sections ─────────────────────────────────────────────────
+DIR_NAME=""
+if [ "$SHOW_DIR" = "1" ] && [ -n "$CWD" ]; then
+    DIR_NAME="${CWD##*/}"
+    DIR_NAME="${DIR_NAME//[$'\x01'-$'\x1f'$'\x7f']/}"
+fi
+
+CTX_TOKENS_STR=""
+if [ "$SHOW_CONTEXT_TOKENS" = "1" ]; then
+    CTX_TOK="$(num "${J_CTX_TOKENS:-0}")"
+    if [ "$CTX_TOK" -gt 0 ]; then
+        CTX_TOKENS_STR="$(( CTX_TOK / 1000 ))k/$(( $(num "${J_CTX_SIZE:-0}") / 1000 ))k"
+    fi
+fi
+
+BURN_STR=""
+if [ "$SHOW_BURN_RATE" = "1" ] && [ -n "$J_TRANSCRIPT" ]; then
+    BURN_RAW=$(burn_rate_per_min "$J_TRANSCRIPT" "$BURN_WINDOW_MIN")
+    if [ -n "$BURN_RAW" ] && [ "$BURN_RAW" -gt 0 ] 2>/dev/null; then
+        if [ "$BURN_RAW" -ge 1000 ]; then
+            BURN_STR="$(awk "BEGIN {printf \"%.1fk/min\", $BURN_RAW / 1000}")"
+        else
+            BURN_STR="${BURN_RAW}/min"
+        fi
+    fi
+fi
+
+SESSIONS_STR=""
+if [ "$SHOW_SESSIONS" = "1" ]; then
+    SESSIONS_N=$(count_active_sessions "$PROJECTS_DIR" "$SESSION_ACTIVE_MIN")
+    [ -n "$SESSIONS_N" ] && [ "$SESSIONS_N" -gt 0 ] 2>/dev/null && SESSIONS_STR="×${SESSIONS_N}"
+fi
+
+# The plain style renders the 5-hour reset as its own clock segment: current time,
+# the reset time dimmed, and the remaining span.
+TIMER_STR=""
+if [ "$STATUSLINE_STYLE" = "plain" ] && [ -n "$SESS_EPOCH" ] && [ "$SESS_EPOCH" -gt "$NOW" ] 2>/dev/null; then
+    RESET_CLOCK=$(tz_date "${TIMEZONE}" -d "@$SESS_EPOCH" +"%H:%M" 2>/dev/null \
+        || tz_date "${TIMEZONE}" -r "$SESS_EPOCH" +"%H:%M" 2>/dev/null)
+    if [ -n "$RESET_CLOCK" ]; then
+        TIMER_STR="$(tz_date "${TIMEZONE}" +"%H:%M")${C_DIM}/${RESET_CLOCK} ($(format_remaining $(( SESS_EPOCH - NOW ))))${C_RESET}"
+    fi
+fi
+
 # ── Assemble ──────────────────────────────────────────────────────────────────
 PARTS=()
-[ -n "$BRANCH" ] && PARTS+=("🌿 $BRANCH$DIRTY")
-if [ -n "$MODEL" ] && [ -n "$EFFORT_LABEL" ]; then
-    PARTS+=("$MODEL/$EFFORT_LABEL")
-elif [ -n "$MODEL" ]; then
-    PARTS+=("$MODEL")
-fi
-[ -n "$CTX_PERCENT" ]         && PARTS+=("$CTX_COLOR $CTX_LABEL $CTX_BAR ${CTX_PERCENT}%")
-[ -n "$BLOCK_DISPLAY" ]       && PARTS+=("$BLOCK_DISPLAY")
-[ -n "$WEEK_SONNET_DISPLAY" ] && PARTS+=("$WEEK_SONNET_DISPLAY")
-# Cost + duration (only if non-zero)
-if [ -n "$COST_STR" ] && [ -n "$DURATION_STR" ]; then
-    PARTS+=("$COST_STR ⏱ $DURATION_STR")
-elif [ -n "$COST_STR" ]; then
-    PARTS+=("$COST_STR")
+if [ "$STATUSLINE_STYLE" = "plain" ]; then
+    [ -n "$DIR_NAME" ] && PARTS+=("${C_DIR}${DIR_NAME}${C_RESET}")
+    # Outside a repository the plain style drops the segment entirely rather than
+    # printing a placeholder: a permanent "(no git)" is noise in any non-repo cwd.
+    [ "$SHOW_BRANCH" != "0" ] && [ -n "$BRANCH" ] && [ "$BRANCH" != "(no git)" ] \
+        && PARTS+=("${C_DIM}${BRANCH}${DIRTY}${C_RESET}")
+    if [ "$SHOW_MODEL" != "0" ] && [ -n "$MODEL" ]; then
+        if [ -n "$EFFORT_LABEL" ]; then PARTS+=("$MODEL/$EFFORT_LABEL"); else PARTS+=("$MODEL"); fi
+    fi
+    if [ -n "$CTX_TOKENS_STR" ]; then
+        PARTS+=("${C_CTX}${CTX_TOKENS_STR} [${CTX_BAR}]${C_RESET}")
+    elif [ -n "$CTX_PERCENT" ]; then
+        PARTS+=("${C_CTX}${CTX_LABEL} [${CTX_BAR}] ${CTX_PERCENT}%${C_RESET}")
+    fi
+    [ -n "$SESS_PCT" ] && [ "$SESS_PCT" != "null" ] && \
+        PARTS+=("$(render_quota_plain "5h" "$SESS_PCT" "$SESS_EPOCH")")
+    if [ "$SHOW_WEEKLY" = "1" ] && [ -n "$WEEK_PCT" ] && [ "$WEEK_PCT" != "null" ]; then
+        PARTS+=("$(render_quota_plain "7d" "$WEEK_PCT" "$WEEK_EPOCH")")
+    fi
+    if [ "$SHOW_WEEKLY" = "1" ] && [ -n "$SONNET_PCT" ] && [ "$SONNET_PCT" != "null" ]; then
+        PARTS+=("$(render_quota_plain "snt" "$SONNET_PCT" "")")
+    fi
+    [ -n "$TIMER_STR" ]   && PARTS+=("${C_TIMER}${TIMER_STR}${C_RESET}")
+    [ -n "$BURN_STR" ]    && PARTS+=("${C_CYAN}${BURN_STR}${C_RESET}")
+    [ -n "$SESSIONS_STR" ] && PARTS+=("${C_CYAN}${SESSIONS_STR}${C_RESET}")
+    if [ "$SHOW_COST" != "0" ] && [ -n "$COST_STR" ]; then
+        if [ -n "$DURATION_STR" ]; then PARTS+=("$COST_STR $DURATION_STR"); else PARTS+=("$COST_STR"); fi
+    fi
+    SEP=" ${C_DIM}|${C_RESET} "
+else
+    [ -n "$DIR_NAME" ] && PARTS+=("$DIR_NAME")
+    [ "$SHOW_BRANCH" != "0" ] && [ -n "$BRANCH" ] && PARTS+=("🌿 $BRANCH$DIRTY")
+    if [ "$SHOW_MODEL" != "0" ] && [ -n "$MODEL" ]; then
+        if [ -n "$EFFORT_LABEL" ]; then PARTS+=("$MODEL/$EFFORT_LABEL"); else PARTS+=("$MODEL"); fi
+    fi
+    if [ -n "$CTX_TOKENS_STR" ]; then
+        PARTS+=("$CTX_COLOR $CTX_TOKENS_STR $CTX_BAR")
+    elif [ -n "$CTX_PERCENT" ]; then
+        PARTS+=("$CTX_COLOR $CTX_LABEL $CTX_BAR ${CTX_PERCENT}%")
+    fi
+    [ -n "$BLOCK_DISPLAY" ]       && PARTS+=("$BLOCK_DISPLAY")
+    [ -n "$WEEK_SONNET_DISPLAY" ] && PARTS+=("$WEEK_SONNET_DISPLAY")
+    [ -n "$BURN_STR" ]            && PARTS+=("$BURN_STR")
+    [ -n "$SESSIONS_STR" ]        && PARTS+=("$SESSIONS_STR")
+    # Cost + duration (only if non-zero)
+    if [ "$SHOW_COST" != "0" ] && [ -n "$COST_STR" ] && [ -n "$DURATION_STR" ]; then
+        PARTS+=("$COST_STR ⏱ $DURATION_STR")
+    elif [ "$SHOW_COST" != "0" ] && [ -n "$COST_STR" ]; then
+        PARTS+=("$COST_STR")
+    fi
+    SEP=" │ "
 fi
 
 RESULT=""
 for part in "${PARTS[@]}"; do
-    [ -z "$RESULT" ] && RESULT="$part" || RESULT="$RESULT │ $part"
+    [ -z "$RESULT" ] && RESULT="$part" || RESULT="$RESULT$SEP$part"
 done
 
 echo "${RESULT}"
