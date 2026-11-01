@@ -60,7 +60,23 @@ If Anthropic removes this endpoint, the script still works for subscribers via t
 
 ## Install
 
-### One-liner
+### Windows (PowerShell)
+
+```powershell
+irm https://raw.githubusercontent.com/ohugonnot/claude-code-statusline/main/install.ps1 | iex
+```
+
+This installs Git for Windows and `jq` via `winget` if they are missing, downloads the script, and registers it in `%USERPROFILE%\.claude\settings.json` (your existing file is backed up to `settings.json.bak`). Then open a **new** terminal and restart Claude Code.
+
+With a custom refresh interval (e.g. every 2 minutes):
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/ohugonnot/claude-code-statusline/main/install.ps1))) -Refresh 120
+```
+
+> Don't paste the Linux/macOS one-liner below into PowerShell: `curl` is an alias for `Invoke-WebRequest` there, and `bash` resolves to WSL rather than Git Bash. If you use Claude Code inside WSL, follow the Linux instructions from your WSL shell instead.
+
+### One-liner (Linux / macOS / WSL)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ohugonnot/claude-code-statusline/main/install.sh | bash
@@ -98,7 +114,7 @@ Merge this key into your existing `~/.claude/settings.json` (create the file if 
 
 ## Requirements
 
-- Linux, WSL, or macOS
+- Linux, WSL, macOS, or Windows (via Git for Windows - `install.ps1` sets it up)
 - `bash`, `jq`, `curl` (no tmux, no python)
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI installed
 
