@@ -111,7 +111,7 @@ JSON=$(cat)
 # rate_limits). rate_limits.* is native since Claude Code 2.1.x (Pro/Max) —
 # preferred over the API call when present.
 IFS=$'\x1f' read -r J_MODEL_DISPLAY J_MODEL_RAW J_CTX_PCT J_CTX_SIZE J_COST J_DURATION J_CWD \
-    J_RL_5H_PCT J_RL_5H_RESET J_RL_7D_PCT J_RL_7D_RESET \
+    J_RL_5H_PCT J_RL_5H_RESET J_RL_7D_PCT J_RL_7D_RESET J_EFFORT \
     < <(echo "$JSON" | jq -r '[
         (if .model | type == "object" then .model.display_name // "" else "" end),
         (if .model | type == "string" then .model else "" end),
@@ -123,7 +123,8 @@ IFS=$'\x1f' read -r J_MODEL_DISPLAY J_MODEL_RAW J_CTX_PCT J_CTX_SIZE J_COST J_DU
         (.rate_limits.five_hour.used_percentage // ""),
         (.rate_limits.five_hour.resets_at // ""),
         (.rate_limits.seven_day.used_percentage // ""),
-        (.rate_limits.seven_day.resets_at // "")
+        (.rate_limits.seven_day.resets_at // ""),
+        (.effort.level // "")
     ] | join("\u001f")' 2>/dev/null)
 
 # ── Model ─────────────────────────────────────────────────────────────────────
@@ -140,16 +141,24 @@ esac
 # strip control bytes — model name comes from untrusted JSON (terminal OSC injection)
 MODEL="${MODEL//[$'\x01'-$'\x1f'$'\x7f']/}"
 
-# ── Effort level (from settings.json — not yet in stdin JSON) ────────────────
-EFFORT_LABEL=""
-if [ -f "$SETTINGS_FILE" ]; then
-    case "$(jq -r '.effortLevel // empty' "$SETTINGS_FILE" 2>/dev/null)" in
-        low)    EFFORT_LABEL="lo" ;;
-        medium) EFFORT_LABEL="md" ;;
-        high)   EFFORT_LABEL="hi" ;;
-        max)    EFFORT_LABEL="mx" ;;
-    esac
+# ── Effort level ──────────────────────────────────────────────────────────────
+# effort.level on stdin is the live session value and follows a mid-session
+# /effort change. settings.json only ever holds the configured default, so it goes
+# stale the moment the level is changed — stdin wins, and the file stays as the
+# fallback for a Claude Code that does not send the field, or a model with no
+# effort parameter. Ultracode is not a separate level: it reports as xhigh.
+EFFORT_RAW="$J_EFFORT"
+if [ -z "$EFFORT_RAW" ] && [ -f "$SETTINGS_FILE" ]; then
+    EFFORT_RAW=$(jq -r '.effortLevel // empty' "$SETTINGS_FILE" 2>/dev/null)
 fi
+EFFORT_LABEL=""
+case "$EFFORT_RAW" in
+    low)    EFFORT_LABEL="lo" ;;
+    medium) EFFORT_LABEL="md" ;;
+    high)   EFFORT_LABEL="hi" ;;
+    xhigh)  EFFORT_LABEL="xh" ;;
+    max)    EFFORT_LABEL="mx" ;;
+esac
 
 # ── Context window ────────────────────────────────────────────────────────────
 CTX_PERCENT="$(num "${J_CTX_PCT:-0}")"
