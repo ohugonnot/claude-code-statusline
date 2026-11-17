@@ -29,30 +29,30 @@ Color-coded progress bars: 🟢 under 50% │ 🟡 50-80% │ 🔴 80% and above
 With `SHOW_WEEKLY=1`:
 
 ```
-🌿 main★ │ Opus 4.6 │ 🟢 1M ▓▓▓░░░ 42% │ ⏳ 🟡 ▓▓░░░░ 35% ↻ 2h30m │ 📅 🟢 17% / Snt 🟢 10% ↻ thu 13h │ $0.42 ⏱ 1h4m
+🌿 main★ │ Opus 4.6 │ 🟢 1M ▓▓▓░░░ 42% │ ⏳ 🟡 ▓▓░░░░ 35% ↻ 2h30m │ 📅 🟢 17% / Fable 🟢 10% ↻ thu 13h │ $0.42 ⏱ 1h4m
 ```
 
 | Segment | Example | Description |
 |---------|---------|-------------|
-| **Weekly** | `📅 🟢 17% / Snt 🟢 10% ↻ thu 13h` | Weekly all-models + Sonnet quotas, reset day |
+| **Weekly** | `📅 🟢 17% / Fable 🟢 10% ↻ thu 13h` | Weekly all-models quota, then the per-model quota your plan has (named after the model), reset day |
 
 ## How it works
 
 ```
 Claude Code → JSON stdin → statusline.sh → formatted status string
                               │  rate_limits in stdin?  ── yes ─→ use it (no network)
-                              └─ no / Sonnet quota needed ─→ curl → usage API → cache
+                              └─ no / per-model quota needed ─→ curl → usage API → cache
 ```
 
 **Preferred path (no network):** Claude Code ≥2.1.x passes `rate_limits.five_hour` and `.seven_day` directly on stdin for Pro/Max subscribers. The script uses these — session and weekly-all quotas with zero API calls.
 
-**Fallback path:** when the stdin field is absent (older Claude Code, not a Pro/Max plan), or when the per-model Sonnet weekly quota is requested (`SHOW_WEEKLY=1`, not in stdin), the script calls the Anthropic usage API with your OAuth token. The call takes ~200ms and runs inline (cached for `REFRESH_INTERVAL`, default 5 minutes) — no background processes, no tmux, no scraping.
+**Fallback path:** when the stdin field is absent (older Claude Code, not a Pro/Max plan), or when the per-model weekly quota is requested (`SHOW_WEEKLY=1`, not in stdin), the script calls the Anthropic usage API with your OAuth token. The call takes ~200ms and runs inline (cached for `REFRESH_INTERVAL`, default 5 minutes) — no background processes, no tmux, no scraping.
 
 The OAuth token is read from `~/.claude/.credentials.json`, which Claude Code maintains automatically during active sessions. If the token is expired or the API is unreachable, the script silently falls back to cached data or displays without usage info.
 
 ### About the Usage API
 
-The fallback uses `https://api.anthropic.com/api/oauth/usage`, an **undocumented** Anthropic endpoint discovered by the community. It returns session (5h) and weekly (7d) quota utilization as percentages with ISO 8601 reset timestamps, plus a Sonnet-only weekly figure not present in the stdin field.
+The fallback uses `https://api.anthropic.com/api/oauth/usage`, an **undocumented** Anthropic endpoint discovered by the community. It returns session (5h) and weekly (7d) quota utilization as percentages with ISO 8601 reset timestamps, plus a per-model weekly figure (in its `limits` array) not present in the stdin field.
 
 This is not an official API — it could change without notice. There's an open feature request for official programmatic access: [anthropics/claude-code#13585](https://github.com/anthropics/claude-code/issues/13585).
 
@@ -127,8 +127,8 @@ Export in your shell profile or edit the top of `statusline.sh`:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `REFRESH_INTERVAL` | `300` | Seconds between API calls — **do not set to 0** (causes rate limiting) |
-| `SHOW_WEEKLY` | `0` | Set to `1` to show weekly + Sonnet quotas |
-| `SHOW_SONNET` | `1` | Set to `0` to drop the Sonnet quota. When Claude Code sends both quota windows on stdin, the script then makes no API call at all (see #4: the API may not return this quota anymore) |
+| `SHOW_WEEKLY` | `0` | Set to `1` to show weekly + per-model quotas |
+| `SHOW_MODEL_WEEKLY` | `1` | Set to `0` to drop the per-model quota. When Claude Code sends both quota windows on stdin, the script then makes no API call at all |
 | `SHOW_DIR` | `0` | Set to `1` to start the line with the project directory name |
 | `SHOW_CONTEXT_TOKENS` | `0` | Set to `1` to show context as `194k/1000k` instead of a percentage |
 | `TIMEZONE` | *(system default)* | Override display timezone (e.g. `America/New_York`) |

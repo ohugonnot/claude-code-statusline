@@ -249,7 +249,7 @@ echo '{"timestamp":"2026-02-21T10:00:00+00:00","source":"api","metrics":{"week_s
 OUT=$(run_statusline '{"model":"claude-sonnet-4-6","context_window":{"used_percentage":0}}' \
     USAGE_FILE="$USAGE_SNT" REFRESH_INTERVAL=999999 SHOW_WEEKLY=1)
 assert_contains "sonnet 72%" "72%" "$OUT"
-assert_contains "Snt label" "Snt" "$OUT"
+assert_contains "legacy week_sonnet cache keeps its Sonnet label" "Sonnet 🟡 72%" "$OUT"
 
 # Test 9 — Haiku model
 echo ""
@@ -545,9 +545,9 @@ run_fake_home "$NO_RL" >/dev/null
 assert_eq "no Keychain lookup outside macOS" "" "$(cat "$CALLS")"
 rm -rf "$FAKE_HOME"
 
-# Test 32 — opt-in segments: SHOW_DIR, SHOW_CONTEXT_TOKENS, SHOW_SONNET
+# Test 32 — opt-in segments: SHOW_DIR, SHOW_CONTEXT_TOKENS, SHOW_MODEL_WEEKLY
 echo ""
-echo "-- Test 32: SHOW_DIR / SHOW_CONTEXT_TOKENS / SHOW_SONNET --"
+echo "-- Test 32: SHOW_DIR / SHOW_CONTEXT_TOKENS / SHOW_MODEL_WEEKLY --"
 CTX_JSON='{"model":"claude-sonnet-4-6","workspace":{"current_dir":"/home/me/my-project"},"context_window":{"used_percentage":19,"total_input_tokens":194250,"context_window_size":1000000}}'
 OUT=$(run_statusline "$CTX_JSON" USAGE_FILE=/dev/null)
 assert_not_contains "directory off by default" "my-project" "$OUT"
@@ -568,24 +568,45 @@ assert_contains "no window size: tokens alone" "🟢 45k ░" "$OUT"
 assert_not_contains "no window size: no /0k" "/0k" "$OUT"
 
 OUT=$(run_statusline '{"model":"claude-sonnet-4-6","context_window":{"used_percentage":0}}' \
-    USAGE_FILE="$USAGE_SNT" REFRESH_INTERVAL=999999 SHOW_WEEKLY=1 SHOW_SONNET=0)
-assert_not_contains "SHOW_SONNET=0 hides a cached Sonnet quota" "Snt 🟡 72%" "$OUT"
+    USAGE_FILE="$USAGE_SNT" REFRESH_INTERVAL=999999 SHOW_WEEKLY=1 SHOW_MODEL_WEEKLY=0)
+assert_not_contains "SHOW_MODEL_WEEKLY=0 hides a cached model quota" "72%" "$OUT"
 
-# Both windows on stdin + SHOW_SONNET=0: the API has nothing left to add.
-SNT_DIR=$(mktemp -d /tmp/test-snt-XXXX)
-printf '#!/bin/sh\necho called >> "%s/calls"\n' "$SNT_DIR" > "$SNT_DIR/curl"; chmod +x "$SNT_DIR/curl"
-echo '{"claudeAiOauth":{"accessToken":"tok"}}' > "$SNT_DIR/creds.json"
+# Test 33 — per-model weekly quota from the API (fake curl, empty cache, both windows on stdin)
+echo ""
+echo "-- Test 33: per-model weekly quota (limits[], issue #4) --"
+MQ_DIR=$(mktemp -d /tmp/test-mq-XXXX)
+cat > "$MQ_DIR/curl" <<EOF
+#!/bin/sh
+echo called >> "$MQ_DIR/calls"
+cat "$MQ_DIR/resp.json"
+EOF
+chmod +x "$MQ_DIR/curl"
+echo '{"claudeAiOauth":{"accessToken":"tok"}}' > "$MQ_DIR/creds.json"
 BOTH_RL='{"model":"claude-sonnet-4-6","rate_limits":{"five_hour":{"used_percentage":10,"resets_at":4102444800},"seven_day":{"used_percentage":20,"resets_at":4102444800}}}'
-snt_calls() {  # <SHOW_SONNET> — number of curl calls for one render with an empty cache
-    rm -f "$SNT_DIR/calls" "$SNT_DIR/usage.json"
-    echo "$BOTH_RL" | env PATH="$SNT_DIR:$PATH" XDG_RUNTIME_DIR="$SNT_DIR" CREDENTIALS_FILE="$SNT_DIR/creds.json" \
-        USAGE_FILE="$SNT_DIR/usage.json" SETTINGS_FILE=/dev/null SHOW_WEEKLY=1 SHOW_SONNET="$1" \
-        bash "$STATUSLINE_SH" >/dev/null 2>&1
-    [ -f "$SNT_DIR/calls" ] && wc -l < "$SNT_DIR/calls" | tr -d ' ' || echo 0
+RESP_WINDOWS='"five_hour":{"utilization":10,"resets_at":"2099-01-01T00:00:00+00:00"},"seven_day":{"utilization":20,"resets_at":"2099-01-01T00:00:00+00:00"}'
+render_with_api() {  # <api response> [VAR=value...] — one render with an empty cache
+    echo "$1" > "$MQ_DIR/resp.json"; shift
+    rm -f "$MQ_DIR/calls" "$MQ_DIR/usage.json"
+    echo "$BOTH_RL" | env PATH="$MQ_DIR:$PATH" XDG_RUNTIME_DIR="$MQ_DIR" CREDENTIALS_FILE="$MQ_DIR/creds.json" \
+        USAGE_FILE="$MQ_DIR/usage.json" SETTINGS_FILE=/dev/null SHOW_WEEKLY=1 "$@" \
+        bash "$STATUSLINE_SH" 2>/dev/null
 }
-assert_eq "SHOW_SONNET=1 still fetches the Sonnet quota" "1" "$(snt_calls 1)"
-assert_eq "SHOW_SONNET=0 makes no API call" "0" "$(snt_calls 0)"
-rm -rf "$SNT_DIR"
+api_calls() { [ -f "$MQ_DIR/calls" ] && wc -l < "$MQ_DIR/calls" | tr -d ' ' || echo 0; }
+
+OUT=$(render_with_api "{$RESP_WINDOWS,\"seven_day_sonnet\":null,\"limits\":[{\"kind\":\"weekly_all\",\"percent\":20},{\"kind\":\"weekly_scoped\",\"percent\":12,\"resets_at\":null,\"scope\":{\"model\":{\"display_name\":\"Fa\\u001bble\"}}}]}")
+assert_contains "quota read from limits[], named after the model" "/ Fable 🟢 12%" "$OUT"
+assert_eq "one API call for the model quota" "1" "$(api_calls)"
+
+OUT=$(render_with_api "{$RESP_WINDOWS,\"seven_day_sonnet\":{\"utilization\":30,\"resets_at\":null}}")
+assert_contains "older accounts: seven_day_sonnet still read" "/ Sonnet 🟢 30%" "$OUT"
+
+OUT=$(render_with_api "{$RESP_WINDOWS,\"seven_day_sonnet\":null,\"limits\":[{\"kind\":\"weekly_scoped\",\"percent\":null}]}")
+assert_contains "no usable model quota: weekly still shown" "📅 🟢 20%" "$OUT"
+assert_not_contains "no usable model quota: no ' / ' segment" "% / " "$OUT"
+
+render_with_api "{$RESP_WINDOWS}" SHOW_MODEL_WEEKLY=0 >/dev/null
+assert_eq "SHOW_MODEL_WEEKLY=0 makes no API call" "0" "$(api_calls)"
+rm -rf "$MQ_DIR"
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo ""

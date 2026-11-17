@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Real-time status line for Claude Code that displays rate limit usage, session cost, model, git branch, and context window in the IDE status bar. Prefers the native `rate_limits` field Claude Code passes on stdin (≥2.1.x, Pro/Max); falls back to the undocumented Anthropic OAuth usage API (cached to JSON) when that field is absent or the Sonnet weekly quota is needed. Renders color-coded progress bars.
+Real-time status line for Claude Code that displays rate limit usage, session cost, model, git branch, and context window in the IDE status bar. Prefers the native `rate_limits` field Claude Code passes on stdin (≥2.1.x, Pro/Max); falls back to the undocumented Anthropic OAuth usage API (cached to JSON) when that field is absent or the per-model weekly quota is needed. Renders color-coded progress bars.
 
 **Stack**: Bash, jq, curl. No build step, no external test framework.
 
@@ -35,12 +35,12 @@ Three files, single-purpose each:
 ```
 Claude Code → JSON stdin → statusline.sh → formatted status string
                               │  rate_limits in stdin?  ── yes ─→ use it (no network)
-                              └─ else / Sonnet quota ─→ curl → usage API → ~/.claude/usage-exact.json
+                              └─ else / per-model quota ─→ curl → usage API → ~/.claude/usage-exact.json
 ```
 
 ### Key Design Decisions
 
-- **Native stdin first**: `rate_limits.five_hour` / `.seven_day` (epoch `resets_at`) feed the session + weekly-all blocks with no network call. The API is hit only when the field is absent (older CC / non-subscriber) or for the Sonnet weekly quota (API-only). `NEED_API` gates the refresh; most renders make zero calls.
+- **Native stdin first**: `rate_limits.five_hour` / `.seven_day` (epoch `resets_at`) feed the session + weekly-all blocks with no network call. The API is hit only when the field is absent (older CC / non-subscriber) or for the per-model weekly quota (API-only). `NEED_API` gates the refresh; most renders make zero calls.
 - **Field parsing via US (0x1f) separator**: stdin/cache fields are joined with US (`\u001f`), not `|` — a `|` in a branch path or model name would shift every field. `IFS=$'\t'` is wrong here (tab is IFS-whitespace → empty fields collapse); US is non-whitespace so empties (absent rate_limits) survive.
 - **Arithmetic-injection guard (`num()`)**: every value reaching `$(( ))` or `[ -lt ]` is coerced to a bare integer first — a cache/stdin value like `x[$(cmd)]` would otherwise execute `cmd` via arithmetic array-subscript evaluation.
 - **Inline API call**: single `curl` (~200ms), atomic `mktemp + mv` write, `flock` so concurrent windows don't double-call (macOS has no `flock`: it refreshes unlocked). Token passed to curl on stdin (`-H @-`), never in argv. No background processes, no tmux, no python.
@@ -56,9 +56,15 @@ The script uses `https://api.anthropic.com/api/oauth/usage`, an undocumented Ant
 {
   "five_hour": { "utilization": 18.0, "resets_at": "2026-03-27T10:00:00+00:00" },
   "seven_day": { "utilization": 17.0, "resets_at": "2026-04-02T13:00:00+00:00" },
-  "seven_day_sonnet": { "utilization": 10.0, "resets_at": "2026-04-02T13:00:00+00:00" }
+  "seven_day_sonnet": null,
+  "limits": [
+    { "kind": "weekly_scoped", "percent": 10, "resets_at": "2026-04-02T13:00:00+00:00",
+      "scope": { "model": { "display_name": "Fable" } } }
+  ]
 }
 ```
+
+The per-model quota is the first `weekly_scoped` entry of `limits`, cached as `metrics.week_model` with its `name`. `seven_day_sonnet` (always `null` now) is still read as a fallback for older accounts, and a cache with the former `week_sonnet` key still renders.
 
 Tracked upstream: [anthropics/claude-code#13585](https://github.com/anthropics/claude-code/issues/13585)
 
@@ -68,8 +74,8 @@ Tracked upstream: [anthropics/claude-code#13585](https://github.com/anthropics/c
 |----------|---------|-------|
 | `TIMEZONE` | system | Override for display (e.g. `America/New_York`) |
 | `REFRESH_INTERVAL` | `300` | Seconds between API calls — do not set to 0 (rate limiting) |
-| `SHOW_WEEKLY` | `0` | Set to `1` to show weekly + Sonnet quotas |
-| `SHOW_SONNET` | `1` | `0` hides the Sonnet quota; with both windows on stdin, `NEED_API` drops to 0 |
+| `SHOW_WEEKLY` | `0` | Set to `1` to show weekly + per-model quotas |
+| `SHOW_MODEL_WEEKLY` | `1` | `0` hides the per-model quota; with both windows on stdin, `NEED_API` drops to 0 |
 | `SHOW_DIR` | `0` | Leading project directory name (handles `\` paths) |
 | `SHOW_CONTEXT_TOKENS` | `0` | Context as `194k/1000k` (`total_input_tokens` = current context, not a session total) |
 | `USAGE_FILE` | `~/.claude/usage-exact.json` | Cache location |

@@ -11,8 +11,8 @@
 # ── Configuration (override via environment variables) ────────────────────────
 TIMEZONE="${TIMEZONE:-}"                            # e.g. "America/New_York", empty = system default
 REFRESH_INTERVAL="${REFRESH_INTERVAL:-300}"           # seconds between API calls (0 = every render, risks rate limiting)
-SHOW_WEEKLY="${SHOW_WEEKLY:-0}"                      # set to 1 to show weekly + sonnet quotas
-SHOW_SONNET="${SHOW_SONNET:-1}"                      # 0 = hide the Sonnet-only quota and never call the API for it
+SHOW_WEEKLY="${SHOW_WEEKLY:-0}"                      # set to 1 to show weekly + per-model quotas
+SHOW_MODEL_WEEKLY="${SHOW_MODEL_WEEKLY:-1}"          # 0 = hide the per-model weekly quota and never call the API for it
 SHOW_DIR="${SHOW_DIR:-0}"                            # 1 = lead with the project directory name
 SHOW_CONTEXT_TOKENS="${SHOW_CONTEXT_TOKENS:-0}"      # 1 = context as "194k/1000k" instead of a percentage
 USAGE_FILE="${USAGE_FILE:-$HOME/.claude/usage-exact.json}"
@@ -244,11 +244,22 @@ refresh_usage_api() {
                 percent_remaining: (100 - .seven_day.utilization),
                 resets_at: .seven_day.resets_at
             },
-            week_sonnet: (if .seven_day_sonnet then {
-                percent_used: .seven_day_sonnet.utilization,
-                percent_remaining: (100 - .seven_day_sonnet.utilization),
-                resets_at: .seven_day_sonnet.resets_at
-            } else null end)
+            # Per-model quotas moved to limits[] (kind weekly_scoped); seven_day_sonnet
+            # is now always null but kept as a fallback for older accounts.
+            week_model: (
+                ([(.limits | arrays // [])[] | select(.kind == "weekly_scoped" and (.percent | type) == "number")]
+                    | first | if . then {
+                        name: (.scope.model.display_name // "Model"),
+                        percent_used: .percent,
+                        percent_remaining: (100 - .percent),
+                        resets_at: .resets_at
+                    } else null end)
+                // (if .seven_day_sonnet then {
+                        name: "Sonnet",
+                        percent_used: .seven_day_sonnet.utilization,
+                        percent_remaining: (100 - .seven_day_sonnet.utilization),
+                        resets_at: .seven_day_sonnet.resets_at
+                    } else null end))
         }
     }' > "$tmp"; then
         mv "$tmp" "$USAGE_FILE"
@@ -258,14 +269,14 @@ refresh_usage_api() {
 }
 
 # Native stdin rate_limits (Pro/Max, CC ≥2.1.x) cover session + weekly-all. The
-# API is only needed for the Sonnet quota (SHOW_WEEKLY) or as a fallback when the
+# API is only needed for the per-model quota (SHOW_WEEKLY) or as a fallback when the
 # stdin field is absent — so most renders make no network call at all.
 HAVE_STDIN_SESSION=0
 [ -n "$J_RL_5H_PCT" ] && [ "$J_RL_5H_PCT" != "null" ] && HAVE_STDIN_SESSION=1
 NEED_API=1
 [ "$HAVE_STDIN_SESSION" = 1 ] && [ "$SHOW_WEEKLY" != "1" ] && NEED_API=0
-# With both windows on stdin, the API would only add the Sonnet-only quota.
-[ "$HAVE_STDIN_SESSION" = 1 ] && [ "$SHOW_SONNET" != "1" ] \
+# With both windows on stdin, the API would only add the per-model quota.
+[ "$HAVE_STDIN_SESSION" = 1 ] && [ "$SHOW_MODEL_WEEKLY" != "1" ] \
     && [ -n "$J_RL_7D_PCT" ] && [ "$J_RL_7D_PCT" != "null" ] && NEED_API=0
 
 [[ "$REFRESH_INTERVAL" =~ ^[0-9]+$ ]] || REFRESH_INTERVAL=300
@@ -284,11 +295,11 @@ if [ "$NEED_API" = 1 ] && [ "$(cache_age_sec)" -gt "$REFRESH_INTERVAL" ]; then
 fi
 
 # ── Resolve usage metrics: native stdin (preferred) → API cache (fallback) ────
-BLOCK_DISPLAY="" WEEK_SONNET_DISPLAY=""
+BLOCK_DISPLAY="" WEEK_DISPLAY=""
 NOW=$(date +%s)
 
 SESS_PCT="" SESS_EPOCH="" SESS_FROM_CACHE=0
-WEEK_PCT="" WEEK_EPOCH="" SONNET_PCT=""
+WEEK_PCT="" WEEK_EPOCH="" MODEL_Q_PCT="" MODEL_Q_NAME=""
 
 # Leave the epoch empty when no reset is sent — num("") is "0", which render_quota
 # would read as a past reset and wrongly zero the live percentage.
@@ -302,16 +313,18 @@ if [ "$SHOW_WEEKLY" = "1" ] && [ -n "$J_RL_7D_PCT" ] && [ "$J_RL_7D_PCT" != "nul
 fi
 
 # Cache only fills metrics stdin didn't provide. resets_at parsed as ISO 8601
-# (API format); the Sonnet weekly quota is API-only (absent from stdin).
+# (API format); the per-model weekly quota is API-only (absent from stdin).
+# week_sonnet: cache written before week_model existed.
 if [ -f "$USAGE_FILE" ]; then
-    IFS=$'\x1f' read -r CACHE_SOURCE U_SESS_PCT U_SESS_RESETS U_WEEK_PCT U_WEEK_RESETS U_SONNET_PCT \
+    IFS=$'\x1f' read -r CACHE_SOURCE U_SESS_PCT U_SESS_RESETS U_WEEK_PCT U_WEEK_RESETS U_MODEL_Q_PCT U_MODEL_Q_NAME \
         < <(jq -j '[
             (.source // "legacy"),
             (.metrics.session.percent_used     // ""),
             (.metrics.session.resets_at        // ""),
             (.metrics.week_all.percent_used    // ""),
             (.metrics.week_all.resets_at       // ""),
-            (.metrics.week_sonnet.percent_used // "")
+            (.metrics.week_model.percent_used // .metrics.week_sonnet.percent_used // ""),
+            (.metrics.week_model.name // "Sonnet" | tostring | explode | map(select(. >= 32 and . != 127)) | implode)
         ] | join("\u001f")' "$USAGE_FILE" 2>/dev/null)
 
     if [ -z "$SESS_PCT" ] && [ -n "$U_SESS_PCT" ] && [ "$U_SESS_PCT" != "null" ]; then
@@ -323,7 +336,8 @@ if [ -f "$USAGE_FILE" ]; then
             WEEK_PCT="$U_WEEK_PCT"
             [ "$CACHE_SOURCE" = "api" ] && [ -n "$U_WEEK_RESETS" ] && WEEK_EPOCH="$(iso_to_epoch "$U_WEEK_RESETS")"
         fi
-        [ -n "$U_SONNET_PCT" ] && [ "$U_SONNET_PCT" != "null" ] && SONNET_PCT="$U_SONNET_PCT"
+        [ -n "$U_MODEL_Q_PCT" ] && [ "$U_MODEL_Q_PCT" != "null" ] \
+            && MODEL_Q_PCT="$U_MODEL_Q_PCT" MODEL_Q_NAME="$U_MODEL_Q_NAME"
     fi
 fi
 
@@ -332,7 +346,7 @@ fi
     BLOCK_DISPLAY="$(render_quota "⏳" "$SESS_PCT" "$SESS_EPOCH")"
 
 if [ "$SHOW_WEEKLY" = "1" ]; then
-    WEEK_INT="" WEEK_COLOR="" WEEK_RESET_LABEL="" SONNET_INT="" SONNET_COLOR=""
+    WEEK_INT="" WEEK_COLOR="" WEEK_RESET_LABEL="" MODEL_Q_INT="" MODEL_Q_COLOR=""
     if [ -n "$WEEK_PCT" ] && [ "$WEEK_PCT" != "null" ]; then
         WEEK_INT="$(num "$WEEK_PCT")"; make_bar "$WEEK_INT"; WEEK_COLOR="$BAR_COLOR"
         if [ -n "$WEEK_EPOCH" ]; then
@@ -342,17 +356,17 @@ if [ "$SHOW_WEEKLY" = "1" ]; then
             WEEK_RESET_LABEL=$(echo "$WEEK_RESET_LABEL" | tr '[:upper:]' '[:lower:]')
         fi
     fi
-    if [ "$SHOW_SONNET" = "1" ] && [ -n "$SONNET_PCT" ] && [ "$SONNET_PCT" != "null" ]; then
-        SONNET_INT="$(num "$SONNET_PCT")"; make_bar "$SONNET_INT"; SONNET_COLOR="$BAR_COLOR"
+    if [ "$SHOW_MODEL_WEEKLY" = "1" ] && [ -n "$MODEL_Q_PCT" ] && [ "$MODEL_Q_PCT" != "null" ]; then
+        MODEL_Q_INT="$(num "$MODEL_Q_PCT")"; make_bar "$MODEL_Q_INT"; MODEL_Q_COLOR="$BAR_COLOR"
     fi
-    if [ -n "$WEEK_INT" ] && [ -n "$SONNET_INT" ]; then
-        WEEK_SONNET_DISPLAY="📅 ${WEEK_COLOR} ${WEEK_INT}% / Snt ${SONNET_COLOR} ${SONNET_INT}%"
-        [ -n "$WEEK_RESET_LABEL" ] && WEEK_SONNET_DISPLAY+=" ↻ ${WEEK_RESET_LABEL}"
+    if [ -n "$WEEK_INT" ] && [ -n "$MODEL_Q_INT" ]; then
+        WEEK_DISPLAY="📅 ${WEEK_COLOR} ${WEEK_INT}% / ${MODEL_Q_NAME} ${MODEL_Q_COLOR} ${MODEL_Q_INT}%"
+        [ -n "$WEEK_RESET_LABEL" ] && WEEK_DISPLAY+=" ↻ ${WEEK_RESET_LABEL}"
     elif [ -n "$WEEK_INT" ]; then
-        WEEK_SONNET_DISPLAY="📅 ${WEEK_COLOR} ${WEEK_INT}%"
-        [ -n "$WEEK_RESET_LABEL" ] && WEEK_SONNET_DISPLAY+=" ↻ ${WEEK_RESET_LABEL}"
-    elif [ -n "$SONNET_INT" ]; then
-        WEEK_SONNET_DISPLAY="Snt ${SONNET_COLOR} ${SONNET_INT}%"
+        WEEK_DISPLAY="📅 ${WEEK_COLOR} ${WEEK_INT}%"
+        [ -n "$WEEK_RESET_LABEL" ] && WEEK_DISPLAY+=" ↻ ${WEEK_RESET_LABEL}"
+    elif [ -n "$MODEL_Q_INT" ]; then
+        WEEK_DISPLAY="${MODEL_Q_NAME} ${MODEL_Q_COLOR} ${MODEL_Q_INT}%"
     fi
 fi
 
@@ -401,7 +415,7 @@ elif [ -n "$CTX_PERCENT" ]; then
     PARTS+=("$CTX_COLOR $CTX_LABEL $CTX_BAR ${CTX_PERCENT}%")
 fi
 [ -n "$BLOCK_DISPLAY" ]       && PARTS+=("$BLOCK_DISPLAY")
-[ -n "$WEEK_SONNET_DISPLAY" ] && PARTS+=("$WEEK_SONNET_DISPLAY")
+[ -n "$WEEK_DISPLAY" ]        && PARTS+=("$WEEK_DISPLAY")
 # Cost + duration (only if non-zero)
 if [ -n "$COST_STR" ] && [ -n "$DURATION_STR" ]; then
     PARTS+=("$COST_STR ⏱ $DURATION_STR")
