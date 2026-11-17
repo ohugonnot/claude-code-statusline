@@ -545,6 +545,48 @@ run_fake_home "$NO_RL" >/dev/null
 assert_eq "no Keychain lookup outside macOS" "" "$(cat "$CALLS")"
 rm -rf "$FAKE_HOME"
 
+# Test 32 — opt-in segments: SHOW_DIR, SHOW_CONTEXT_TOKENS, SHOW_SONNET
+echo ""
+echo "-- Test 32: SHOW_DIR / SHOW_CONTEXT_TOKENS / SHOW_SONNET --"
+CTX_JSON='{"model":"claude-sonnet-4-6","workspace":{"current_dir":"/home/me/my-project"},"context_window":{"used_percentage":19,"total_input_tokens":194250,"context_window_size":1000000}}'
+OUT=$(run_statusline "$CTX_JSON" USAGE_FILE=/dev/null)
+assert_not_contains "directory off by default" "my-project" "$OUT"
+assert_contains "context as a percentage by default" "1M ▓▓░░░░ 19%" "$OUT"
+
+OUT=$(run_statusline "$CTX_JSON" USAGE_FILE=/dev/null SHOW_DIR=1)
+assert_contains "directory leads the line" "my-project │" "$OUT"
+OUT=$(run_statusline '{"model":"claude-sonnet-4-6","workspace":{"current_dir":"C:\\Users\\me\\win-proj\\"}}' \
+    USAGE_FILE=/dev/null SHOW_DIR=1)
+assert_contains "Windows path with trailing separator" "win-proj │" "$OUT"
+
+OUT=$(run_statusline "$CTX_JSON" USAGE_FILE=/dev/null SHOW_CONTEXT_TOKENS=1)
+assert_contains "context as tokens" "194k/1000k" "$OUT"
+assert_not_contains "tokens replace the percentage" "19%" "$OUT"
+OUT=$(run_statusline '{"model":"claude-sonnet-4-6","context_window":{"total_input_tokens":45000}}' \
+    USAGE_FILE=/dev/null SHOW_CONTEXT_TOKENS=1)
+assert_contains "no window size: tokens alone" "🟢 45k ░" "$OUT"
+assert_not_contains "no window size: no /0k" "/0k" "$OUT"
+
+OUT=$(run_statusline '{"model":"claude-sonnet-4-6","context_window":{"used_percentage":0}}' \
+    USAGE_FILE="$USAGE_SNT" REFRESH_INTERVAL=999999 SHOW_WEEKLY=1 SHOW_SONNET=0)
+assert_not_contains "SHOW_SONNET=0 hides a cached Sonnet quota" "Snt 🟡 72%" "$OUT"
+
+# Both windows on stdin + SHOW_SONNET=0: the API has nothing left to add.
+SNT_DIR=$(mktemp -d /tmp/test-snt-XXXX)
+printf '#!/bin/sh\necho called >> "%s/calls"\n' "$SNT_DIR" > "$SNT_DIR/curl"; chmod +x "$SNT_DIR/curl"
+echo '{"claudeAiOauth":{"accessToken":"tok"}}' > "$SNT_DIR/creds.json"
+BOTH_RL='{"model":"claude-sonnet-4-6","rate_limits":{"five_hour":{"used_percentage":10,"resets_at":4102444800},"seven_day":{"used_percentage":20,"resets_at":4102444800}}}'
+snt_calls() {  # <SHOW_SONNET> — number of curl calls for one render with an empty cache
+    rm -f "$SNT_DIR/calls" "$SNT_DIR/usage.json"
+    echo "$BOTH_RL" | env PATH="$SNT_DIR:$PATH" XDG_RUNTIME_DIR="$SNT_DIR" CREDENTIALS_FILE="$SNT_DIR/creds.json" \
+        USAGE_FILE="$SNT_DIR/usage.json" SETTINGS_FILE=/dev/null SHOW_WEEKLY=1 SHOW_SONNET="$1" \
+        bash "$STATUSLINE_SH" >/dev/null 2>&1
+    [ -f "$SNT_DIR/calls" ] && wc -l < "$SNT_DIR/calls" | tr -d ' ' || echo 0
+}
+assert_eq "SHOW_SONNET=1 still fetches the Sonnet quota" "1" "$(snt_calls 1)"
+assert_eq "SHOW_SONNET=0 makes no API call" "0" "$(snt_calls 0)"
+rm -rf "$SNT_DIR"
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

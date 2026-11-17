@@ -69,12 +69,15 @@ Tracked upstream: [anthropics/claude-code#13585](https://github.com/anthropics/c
 | `TIMEZONE` | system | Override for display (e.g. `America/New_York`) |
 | `REFRESH_INTERVAL` | `300` | Seconds between API calls — do not set to 0 (rate limiting) |
 | `SHOW_WEEKLY` | `0` | Set to `1` to show weekly + Sonnet quotas |
+| `SHOW_SONNET` | `1` | `0` hides the Sonnet quota; with both windows on stdin, `NEED_API` drops to 0 |
+| `SHOW_DIR` | `0` | Leading project directory name (handles `\` paths) |
+| `SHOW_CONTEXT_TOKENS` | `0` | Context as `194k/1000k` (`total_input_tokens` = current context, not a session total) |
 | `USAGE_FILE` | `~/.claude/usage-exact.json` | Cache location |
 | `CREDENTIALS_FILE` | `~/.claude/.credentials.json` | OAuth token source; macOS Keychain fallback only when left at the default (tests pass `/dev/null`) |
 | `SETTINGS_FILE` | `~/.claude/settings.json` | Effort-level fallback when stdin has no `effort` (also used by tests) |
 
 ## Testing Patterns
 
-Unit tests source the helper section of `statusline.sh` (everything above the stdin read, via `sed`) so pure functions like `make_bar`, `num`, `format_remaining` can be called directly. Integration tests pipe JSON through `statusline.sh` with overridden env vars (`USAGE_FILE`, `REFRESH_INTERVAL`, `SETTINGS_FILE`, `CREDENTIALS_FILE=/dev/null`) to control behavior without triggering the real API. To exercise the native path, include a `rate_limits` object in the stdin JSON. Temp files are tracked in `TMPFILES` array and cleaned via trap.
+Unit tests source the helper section of `statusline.sh` (everything above the stdin read, via `sed`) so pure functions like `make_bar`, `num`, `format_remaining` can be called directly. Integration tests pipe JSON through `statusline.sh` with overridden env vars (`USAGE_FILE`, `REFRESH_INTERVAL`, `SETTINGS_FILE`, `CREDENTIALS_FILE=/dev/null`) to control behavior without triggering the real API. To exercise the native path, include a `rate_limits` object in the stdin JSON. Temp files are tracked in `TMPFILES` array and cleaned via trap. Tests that fake `HOME` need a real `jq` binary on PATH: a version-manager shim (mise, asdf) stops resolving and the Keychain tests fail.
 
 To add a test: create a temp JSON cache file, use `run_statusline` helper with appropriate env overrides, assert on stdout.

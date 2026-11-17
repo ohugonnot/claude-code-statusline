@@ -12,6 +12,9 @@
 TIMEZONE="${TIMEZONE:-}"                            # e.g. "America/New_York", empty = system default
 REFRESH_INTERVAL="${REFRESH_INTERVAL:-300}"           # seconds between API calls (0 = every render, risks rate limiting)
 SHOW_WEEKLY="${SHOW_WEEKLY:-0}"                      # set to 1 to show weekly + sonnet quotas
+SHOW_SONNET="${SHOW_SONNET:-1}"                      # 0 = hide the Sonnet-only quota and never call the API for it
+SHOW_DIR="${SHOW_DIR:-0}"                            # 1 = lead with the project directory name
+SHOW_CONTEXT_TOKENS="${SHOW_CONTEXT_TOKENS:-0}"      # 1 = context as "194k/1000k" instead of a percentage
 USAGE_FILE="${USAGE_FILE:-$HOME/.claude/usage-exact.json}"
 DEFAULT_CREDENTIALS_FILE="$HOME/.claude/.credentials.json"
 CREDENTIALS_FILE="${CREDENTIALS_FILE:-$DEFAULT_CREDENTIALS_FILE}"
@@ -114,7 +117,7 @@ JSON=$(cat)
 # jq -j, not -r: the Windows jq.exe ends lines with \r\n, and read would keep the
 # \r on the last field.
 IFS=$'\x1f' read -r J_MODEL_DISPLAY J_MODEL_RAW J_CTX_PCT J_CTX_SIZE J_COST J_DURATION J_CWD \
-    J_RL_5H_PCT J_RL_5H_RESET J_RL_7D_PCT J_RL_7D_RESET J_EFFORT \
+    J_RL_5H_PCT J_RL_5H_RESET J_RL_7D_PCT J_RL_7D_RESET J_EFFORT J_CTX_TOKENS \
     < <(echo "$JSON" | jq -j '[
         (if .model | type == "object" then .model.display_name // "" else "" end),
         (if .model | type == "string" then .model else "" end),
@@ -127,7 +130,8 @@ IFS=$'\x1f' read -r J_MODEL_DISPLAY J_MODEL_RAW J_CTX_PCT J_CTX_SIZE J_COST J_DU
         (.rate_limits.five_hour.resets_at // ""),
         (.rate_limits.seven_day.used_percentage // ""),
         (.rate_limits.seven_day.resets_at // ""),
-        ((.effort | objects | .level | strings) // "")
+        ((.effort | objects | .level | strings) // ""),
+        (.context_window.total_input_tokens // 0)
     ] | join("\u001f")' 2>/dev/null)
 
 # ── Model ─────────────────────────────────────────────────────────────────────
@@ -260,6 +264,9 @@ HAVE_STDIN_SESSION=0
 [ -n "$J_RL_5H_PCT" ] && [ "$J_RL_5H_PCT" != "null" ] && HAVE_STDIN_SESSION=1
 NEED_API=1
 [ "$HAVE_STDIN_SESSION" = 1 ] && [ "$SHOW_WEEKLY" != "1" ] && NEED_API=0
+# With both windows on stdin, the API would only add the Sonnet-only quota.
+[ "$HAVE_STDIN_SESSION" = 1 ] && [ "$SHOW_SONNET" != "1" ] \
+    && [ -n "$J_RL_7D_PCT" ] && [ "$J_RL_7D_PCT" != "null" ] && NEED_API=0
 
 [[ "$REFRESH_INTERVAL" =~ ^[0-9]+$ ]] || REFRESH_INTERVAL=300
 
@@ -335,7 +342,7 @@ if [ "$SHOW_WEEKLY" = "1" ]; then
             WEEK_RESET_LABEL=$(echo "$WEEK_RESET_LABEL" | tr '[:upper:]' '[:lower:]')
         fi
     fi
-    if [ -n "$SONNET_PCT" ] && [ "$SONNET_PCT" != "null" ]; then
+    if [ "$SHOW_SONNET" = "1" ] && [ -n "$SONNET_PCT" ] && [ "$SONNET_PCT" != "null" ]; then
         SONNET_INT="$(num "$SONNET_PCT")"; make_bar "$SONNET_INT"; SONNET_COLOR="$BAR_COLOR"
     fi
     if [ -n "$WEEK_INT" ] && [ -n "$SONNET_INT" ]; then
@@ -362,15 +369,37 @@ if [ "$IS_STALE" = 1 ] && [ -n "$BLOCK_DISPLAY" ]; then
     BLOCK_DISPLAY="${BLOCK_DISPLAY/🔴/⚠}"
 fi
 
+DIR_NAME=""
+if [ "$SHOW_DIR" = "1" ] && [ -n "$CWD" ]; then
+    # Strip one trailing separator, then keep the last component; \ covers Windows paths.
+    DIR_NAME="${CWD%[/\\]}"
+    DIR_NAME="${DIR_NAME##*[/\\]}"
+    DIR_NAME="${DIR_NAME//[$'\x01'-$'\x1f'$'\x7f']/}"
+fi
+
+CTX_TOKENS_STR=""
+if [ "$SHOW_CONTEXT_TOKENS" = "1" ]; then
+    CTX_TOK="$(num "$J_CTX_TOKENS")" CTX_MAX="$(num "$J_CTX_SIZE")"
+    if [ "$CTX_TOK" -gt 0 ]; then
+        CTX_TOKENS_STR="$(( CTX_TOK / 1000 ))k"
+        [ "$CTX_MAX" -gt 0 ] && CTX_TOKENS_STR+="/$(( CTX_MAX / 1000 ))k"
+    fi
+fi
+
 # ── Assemble ──────────────────────────────────────────────────────────────────
 PARTS=()
+[ -n "$DIR_NAME" ] && PARTS+=("$DIR_NAME")
 [ -n "$BRANCH" ] && PARTS+=("🌿 $BRANCH$DIRTY")
 if [ -n "$MODEL" ] && [ -n "$EFFORT_LABEL" ]; then
     PARTS+=("$MODEL/$EFFORT_LABEL")
 elif [ -n "$MODEL" ]; then
     PARTS+=("$MODEL")
 fi
-[ -n "$CTX_PERCENT" ]         && PARTS+=("$CTX_COLOR $CTX_LABEL $CTX_BAR ${CTX_PERCENT}%")
+if [ -n "$CTX_TOKENS_STR" ]; then
+    PARTS+=("$CTX_COLOR $CTX_TOKENS_STR $CTX_BAR")
+elif [ -n "$CTX_PERCENT" ]; then
+    PARTS+=("$CTX_COLOR $CTX_LABEL $CTX_BAR ${CTX_PERCENT}%")
+fi
 [ -n "$BLOCK_DISPLAY" ]       && PARTS+=("$BLOCK_DISPLAY")
 [ -n "$WEEK_SONNET_DISPLAY" ] && PARTS+=("$WEEK_SONNET_DISPLAY")
 # Cost + duration (only if non-zero)

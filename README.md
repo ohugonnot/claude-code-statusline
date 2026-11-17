@@ -128,6 +128,9 @@ Export in your shell profile or edit the top of `statusline.sh`:
 |----------|---------|-------------|
 | `REFRESH_INTERVAL` | `300` | Seconds between API calls — **do not set to 0** (causes rate limiting) |
 | `SHOW_WEEKLY` | `0` | Set to `1` to show weekly + Sonnet quotas |
+| `SHOW_SONNET` | `1` | Set to `0` to drop the Sonnet quota. When Claude Code sends both quota windows on stdin, the script then makes no API call at all (see #4: the API may not return this quota anymore) |
+| `SHOW_DIR` | `0` | Set to `1` to start the line with the project directory name |
+| `SHOW_CONTEXT_TOKENS` | `0` | Set to `1` to show context as `194k/1000k` instead of a percentage |
 | `TIMEZONE` | *(system default)* | Override display timezone (e.g. `America/New_York`) |
 | `USAGE_FILE` | `~/.claude/usage-exact.json` | Cache file path |
 | `CREDENTIALS_FILE` | `~/.claude/.credentials.json` | OAuth credentials path (on macOS, the Keychain is read when this default file is missing) |
