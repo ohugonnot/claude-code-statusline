@@ -131,6 +131,7 @@ Export in your shell profile or edit the top of `statusline.sh`:
 | `SHOW_MODEL_WEEKLY` | `1` | Set to `0` to drop the per-model quota. When Claude Code sends both quota windows on stdin, the script then makes no API call at all |
 | `SHOW_DIR` | `0` | Set to `1` to start the line with the project directory name |
 | `SHOW_CONTEXT_TOKENS` | `0` | Set to `1` to show context as `194k/1000k` instead of a percentage |
+| `SHOW_SESSIONS` | `0` | Set to `1` to show `×N`, the number of sessions whose transcript changed in the last `SESSION_ACTIVE_MIN` minutes (default `5`). Subagents are not counted |
 | `TIMEZONE` | *(system default)* | Override display timezone (e.g. `America/New_York`) |
 | `USAGE_FILE` | `~/.claude/usage-exact.json` | Cache file path |
 | `CREDENTIALS_FILE` | `~/.claude/.credentials.json` | OAuth credentials path (on macOS, the Keychain is read when this default file is missing) |

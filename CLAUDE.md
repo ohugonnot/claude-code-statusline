@@ -78,6 +78,7 @@ Tracked upstream: [anthropics/claude-code#13585](https://github.com/anthropics/c
 | `SHOW_MODEL_WEEKLY` | `1` | `0` hides the per-model quota; with both windows on stdin, `NEED_API` drops to 0 |
 | `SHOW_DIR` | `0` | Leading project directory name (handles `\` paths) |
 | `SHOW_CONTEXT_TOKENS` | `0` | Context as `194k/1000k` (`total_input_tokens` = current context, not a session total) |
+| `SHOW_SESSIONS` | `0` | `×N` session transcripts (`PROJECTS_DIR/<project>/<session>.jsonl`, depth 2 only, so subagents are left out) written in the last `SESSION_ACTIVE_MIN` minutes |
 | `USAGE_FILE` | `~/.claude/usage-exact.json` | Cache location |
 | `CREDENTIALS_FILE` | `~/.claude/.credentials.json` | OAuth token source; macOS Keychain fallback only when left at the default (tests pass `/dev/null`) |
 | `SETTINGS_FILE` | `~/.claude/settings.json` | Effort-level fallback when stdin has no `effort` (also used by tests) |

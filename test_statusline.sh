@@ -608,6 +608,39 @@ render_with_api "{$RESP_WINDOWS}" SHOW_MODEL_WEEKLY=0 >/dev/null
 assert_eq "SHOW_MODEL_WEEKLY=0 makes no API call" "0" "$(api_calls)"
 rm -rf "$MQ_DIR"
 
+# Test 34 — SHOW_SESSIONS: one per session transcript, subagents and idle sessions left out
+echo ""
+echo "-- Test 34: SHOW_SESSIONS --"
+SESS_DIR=$(mktemp -d)
+mkdir -p "$SESS_DIR/proj-a/s1/subagents" "$SESS_DIR/proj-b"
+touch "$SESS_DIR/proj-a/s1.jsonl" "$SESS_DIR/proj-a/s2.jsonl" "$SESS_DIR/proj-b/s3.jsonl" \
+    "$SESS_DIR/proj-a/s1/subagents/agent-1.jsonl" "$SESS_DIR/proj-a/s1/subagents/agent-2.jsonl"
+touch "$SESS_DIR/proj-b/idle.jsonl"; touch_ago 30 "$SESS_DIR/proj-b/idle.jsonl"
+SESS_JSON='{"model":"claude-sonnet-4-6"}'
+
+OUT=$(run_statusline "$SESS_JSON" USAGE_FILE=/dev/null PROJECTS_DIR="$SESS_DIR")
+assert_not_contains "off by default" "×" "$OUT"
+
+OUT=$(run_statusline "$SESS_JSON" USAGE_FILE=/dev/null PROJECTS_DIR="$SESS_DIR" SHOW_SESSIONS=1)
+assert_contains "two sessions of one project count twice, subagents and idle not at all" "│ ×3" "$OUT"
+
+OUT=$(run_statusline "$SESS_JSON" USAGE_FILE=/dev/null PROJECTS_DIR="$SESS_DIR" SHOW_SESSIONS=1 \
+    SESSION_ACTIVE_MIN=60)
+assert_contains "a wider window takes the idle session in" "│ ×4" "$OUT"
+
+OUT=$(run_statusline "$SESS_JSON" USAGE_FILE=/dev/null PROJECTS_DIR="$SESS_DIR/missing" SHOW_SESSIONS=1)
+assert_not_contains "no projects directory: no segment" "×" "$OUT"
+
+OUT=$(run_statusline "$SESS_JSON" USAGE_FILE=/dev/null PROJECTS_DIR="$SESS_DIR" SHOW_SESSIONS=1 \
+    SESSION_ACTIVE_MIN=abc)
+assert_not_contains "unusable window: no segment" "×" "$OUT"
+
+SESS_CANARY="$SESS_DIR/canary"
+run_statusline "$SESS_JSON" USAGE_FILE=/dev/null PROJECTS_DIR="$SESS_DIR" SHOW_SESSIONS=1 \
+    SESSION_ACTIVE_MIN="x[\$(touch $SESS_CANARY)]" >/dev/null
+assert_absent "SESSION_ACTIVE_MIN goes through num()" "$SESS_CANARY"
+rm -rf "$SESS_DIR"
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

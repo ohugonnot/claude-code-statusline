@@ -15,6 +15,9 @@ SHOW_WEEKLY="${SHOW_WEEKLY:-0}"                      # set to 1 to show weekly +
 SHOW_MODEL_WEEKLY="${SHOW_MODEL_WEEKLY:-1}"          # 0 = hide the per-model weekly quota and never call the API for it
 SHOW_DIR="${SHOW_DIR:-0}"                            # 1 = lead with the project directory name
 SHOW_CONTEXT_TOKENS="${SHOW_CONTEXT_TOKENS:-0}"      # 1 = context as "194k/1000k" instead of a percentage
+SHOW_SESSIONS="${SHOW_SESSIONS:-0}"                  # 1 = count of sessions active in the last SESSION_ACTIVE_MIN minutes
+SESSION_ACTIVE_MIN="${SESSION_ACTIVE_MIN:-5}"
+PROJECTS_DIR="${PROJECTS_DIR:-$HOME/.claude/projects}"
 USAGE_FILE="${USAGE_FILE:-$HOME/.claude/usage-exact.json}"
 DEFAULT_CREDENTIALS_FILE="$HOME/.claude/.credentials.json"
 CREDENTIALS_FILE="${CREDENTIALS_FILE:-$DEFAULT_CREDENTIALS_FILE}"
@@ -104,6 +107,17 @@ render_quota() {
     local out="${emoji} ${BAR_COLOR} ${BAR_STR} ${pct}%"
     [ -n "$remain" ] && out="${out} ↻ ${remain}"
     echo "$out"
+}
+
+# count_active_sessions <projects_dir> <minutes> → session transcripts written in the
+# last <minutes>. Depth 2 only (<project>/<session>.jsonl): subagent transcripts sit
+# one level deeper, in <project>/<session>/subagents/, and are not sessions.
+count_active_sessions() {
+    local dir="$1" minutes
+    minutes="$(num "$2")"
+    { [ -d "$dir" ] && [ "$minutes" -gt 0 ]; } || return
+    find "$dir" -mindepth 2 -maxdepth 2 -type f -name '*.jsonl' -mmin "-$minutes" 2>/dev/null \
+        | wc -l | tr -d ' '
 }
 
 # ── Read JSON input from stdin ────────────────────────────────────────────────
@@ -400,6 +414,12 @@ if [ "$SHOW_CONTEXT_TOKENS" = "1" ]; then
     fi
 fi
 
+SESSIONS_STR=""
+if [ "$SHOW_SESSIONS" = "1" ]; then
+    SESSIONS_N="$(num "$(count_active_sessions "$PROJECTS_DIR" "$SESSION_ACTIVE_MIN")")"
+    [ "$SESSIONS_N" -gt 0 ] && SESSIONS_STR="×${SESSIONS_N}"
+fi
+
 # ── Assemble ──────────────────────────────────────────────────────────────────
 PARTS=()
 [ -n "$DIR_NAME" ] && PARTS+=("$DIR_NAME")
@@ -416,6 +436,7 @@ elif [ -n "$CTX_PERCENT" ]; then
 fi
 [ -n "$BLOCK_DISPLAY" ]       && PARTS+=("$BLOCK_DISPLAY")
 [ -n "$WEEK_DISPLAY" ]        && PARTS+=("$WEEK_DISPLAY")
+[ -n "$SESSIONS_STR" ]        && PARTS+=("$SESSIONS_STR")
 # Cost + duration (only if non-zero)
 if [ -n "$COST_STR" ] && [ -n "$DURATION_STR" ]; then
     PARTS+=("$COST_STR ⏱ $DURATION_STR")
