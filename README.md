@@ -130,8 +130,8 @@ Export in your shell profile or edit the top of `statusline.sh`:
 | `SHOW_WEEKLY` | `0` | Set to `1` to show weekly + Sonnet quotas |
 | `TIMEZONE` | *(system default)* | Override display timezone (e.g. `America/New_York`) |
 | `USAGE_FILE` | `~/.claude/usage-exact.json` | Cache file path |
-| `CREDENTIALS_FILE` | `~/.claude/.credentials.json` | OAuth credentials path |
-| `SETTINGS_FILE` | `~/.claude/settings.json` | Source for the effort-level suffix |
+| `CREDENTIALS_FILE` | `~/.claude/.credentials.json` | OAuth credentials path (on macOS, the Keychain is read when this default file is missing) |
+| `SETTINGS_FILE` | `~/.claude/settings.json` | Effort level, used only when Claude Code does not send it on stdin |
 
 ## Testing
 
@@ -144,10 +144,10 @@ bash test_statusline.sh
 **Usage display frozen / not updating?**
 You may have been rate-limited by the Anthropic API (e.g. `REFRESH_INTERVAL` was too low or set to `0`). Wait a few minutes, then test the API directly — a `rate_limit_error` response confirms it. Once the rate limit clears, the statusline resumes auto-updating.
 
-> **Multiple Claude Code windows?** When the API fallback is in use, all windows share the same cache file (`~/.claude/usage-exact.json`). Whichever window renders first past the `REFRESH_INTERVAL` mark calls the API and refreshes the cache for all others (guarded by a `flock`), so you won't get multiple simultaneous API calls from the same machine. When the native stdin field is available, no API calls happen at all.
+> **Multiple Claude Code windows?** When the API fallback is in use, all windows share the same cache file (`~/.claude/usage-exact.json`). Whichever window renders first past the `REFRESH_INTERVAL` mark calls the API and refreshes the cache for all others. On Linux a `flock` prevents simultaneous calls; macOS has no `flock`, so two windows refreshing at the same moment may each make one call. When the native stdin field is available, no API calls happen at all.
 
 **Usage bars missing?**
-Check that `~/.claude/.credentials.json` exists and contains a valid `claudeAiOauth.accessToken`. This file is created automatically when you log into Claude Code.
+Check that `~/.claude/.credentials.json` exists and contains a valid `claudeAiOauth.accessToken`. This file is created automatically when you log into Claude Code. On macOS, Claude Code stores the token in the Keychain instead, and the statusline reads it from there.
 
 **Force a refresh:**
 ```bash

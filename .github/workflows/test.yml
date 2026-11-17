@@ -10,13 +10,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
+      # The Windows image ships jq.exe and Git Bash; its CRLF output is what that leg tests.
       - name: Install dependencies
+        if: runner.os != 'Windows'
         run: |
           if [ "$RUNNER_OS" = "macOS" ]; then brew install jq shellcheck; else sudo apt-get update && sudo apt-get install -y jq shellcheck; fi
       - name: ShellCheck
+        if: runner.os != 'Windows'
         run: shellcheck statusline.sh install.sh test_statusline.sh test_install.sh
       - name: Run tests
         run: bash test_statusline.sh

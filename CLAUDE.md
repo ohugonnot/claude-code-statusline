@@ -26,7 +26,7 @@ bash install.sh --refresh 120  # custom interval
 
 Three files, single-purpose each:
 
-- **statusline.sh** (core) — Claude Code status line hook. Reads JSON from stdin (model, context_window, workspace, rate_limits), outputs a formatted status string. Uses native stdin `rate_limits` when present, else refreshes via API when cache is stale.
+- **statusline.sh** (core) — Claude Code status line hook. Reads JSON from stdin (model, context_window, workspace, rate_limits, effort), outputs a formatted status string. Uses native stdin `rate_limits` when present, else refreshes via API when cache is stale.
 - **install.sh** — Copies `statusline.sh` to `~/.claude/hooks/`, updates `~/.claude/settings.json`, checks/installs dependencies, cleans up old tmux scraper artifacts.
 - **test_statusline.sh** — Unit + integration tests with simple assert helpers (`assert_eq`, `assert_contains`, `assert_not_contains`).
 
@@ -43,8 +43,8 @@ Claude Code → JSON stdin → statusline.sh → formatted status string
 - **Native stdin first**: `rate_limits.five_hour` / `.seven_day` (epoch `resets_at`) feed the session + weekly-all blocks with no network call. The API is hit only when the field is absent (older CC / non-subscriber) or for the Sonnet weekly quota (API-only). `NEED_API` gates the refresh; most renders make zero calls.
 - **Field parsing via US (0x1f) separator**: stdin/cache fields are joined with US (`\u001f`), not `|` — a `|` in a branch path or model name would shift every field. `IFS=$'\t'` is wrong here (tab is IFS-whitespace → empty fields collapse); US is non-whitespace so empties (absent rate_limits) survive.
 - **Arithmetic-injection guard (`num()`)**: every value reaching `$(( ))` or `[ -lt ]` is coerced to a bare integer first — a cache/stdin value like `x[$(cmd)]` would otherwise execute `cmd` via arithmetic array-subscript evaluation.
-- **Inline API call**: single `curl` (~200ms), atomic `mktemp + mv` write, `flock` so concurrent windows don't double-call. No background processes, no tmux, no python.
-- **Cross-platform**: GNU vs BSD `stat` in `file_mtime()`, GNU `date -d` with a BSD `date -j` fallback in `iso_to_epoch()`. Avoids `grep -P`.
+- **Inline API call**: single `curl` (~200ms), atomic `mktemp + mv` write, `flock` so concurrent windows don't double-call (macOS has no `flock`: it refreshes unlocked). Token passed to curl on stdin (`-H @-`), never in argv. No background processes, no tmux, no python.
+- **Cross-platform**: GNU vs BSD `stat` in `file_mtime()`, GNU `date -d` with a BSD `date -j` fallback in `iso_to_epoch()`. Avoids `grep -P`. `jq -j` (not `-r`) before `read`: Windows `jq.exe` ends lines with `\r\n`.
 - **Graceful degradation**: token/network/endpoint failure → silently fall back to cached data, or render without usage bars.
 - **No legacy tmux cache parsing**: the v1 `resets`-text format is no longer parsed (it was GNU-only / broken on macOS). A v1 cache just shows no usage until the next API refresh repopulates it; `install.sh` still cleans up v1 artifacts.
 
@@ -70,8 +70,8 @@ Tracked upstream: [anthropics/claude-code#13585](https://github.com/anthropics/c
 | `REFRESH_INTERVAL` | `300` | Seconds between API calls — do not set to 0 (rate limiting) |
 | `SHOW_WEEKLY` | `0` | Set to `1` to show weekly + Sonnet quotas |
 | `USAGE_FILE` | `~/.claude/usage-exact.json` | Cache location |
-| `CREDENTIALS_FILE` | `~/.claude/.credentials.json` | OAuth token source |
-| `SETTINGS_FILE` | `~/.claude/settings.json` | Effort-level source (also used by tests) |
+| `CREDENTIALS_FILE` | `~/.claude/.credentials.json` | OAuth token source; macOS Keychain fallback only when left at the default (tests pass `/dev/null`) |
+| `SETTINGS_FILE` | `~/.claude/settings.json` | Effort-level fallback when stdin has no `effort` (also used by tests) |
 
 ## Testing Patterns
 

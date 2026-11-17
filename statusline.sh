@@ -13,7 +13,8 @@ TIMEZONE="${TIMEZONE:-}"                            # e.g. "America/New_York", e
 REFRESH_INTERVAL="${REFRESH_INTERVAL:-300}"           # seconds between API calls (0 = every render, risks rate limiting)
 SHOW_WEEKLY="${SHOW_WEEKLY:-0}"                      # set to 1 to show weekly + sonnet quotas
 USAGE_FILE="${USAGE_FILE:-$HOME/.claude/usage-exact.json}"
-CREDENTIALS_FILE="${CREDENTIALS_FILE:-$HOME/.claude/.credentials.json}"
+DEFAULT_CREDENTIALS_FILE="$HOME/.claude/.credentials.json"
+CREDENTIALS_FILE="${CREDENTIALS_FILE:-$DEFAULT_CREDENTIALS_FILE}"
 SETTINGS_FILE="${SETTINGS_FILE:-$HOME/.claude/settings.json}"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -110,9 +111,11 @@ JSON=$(cat)
 # every field. US is non-whitespace so read preserves empty fields (absent
 # rate_limits). rate_limits.* is native since Claude Code 2.1.x (Pro/Max) —
 # preferred over the API call when present.
+# jq -j, not -r: the Windows jq.exe ends lines with \r\n, and read would keep the
+# \r on the last field.
 IFS=$'\x1f' read -r J_MODEL_DISPLAY J_MODEL_RAW J_CTX_PCT J_CTX_SIZE J_COST J_DURATION J_CWD \
     J_RL_5H_PCT J_RL_5H_RESET J_RL_7D_PCT J_RL_7D_RESET J_EFFORT \
-    < <(echo "$JSON" | jq -r '[
+    < <(echo "$JSON" | jq -j '[
         (if .model | type == "object" then .model.display_name // "" else "" end),
         (if .model | type == "string" then .model else "" end),
         (.context_window.used_percentage // 0 | tostring | split(".")[0]),
@@ -124,7 +127,7 @@ IFS=$'\x1f' read -r J_MODEL_DISPLAY J_MODEL_RAW J_CTX_PCT J_CTX_SIZE J_COST J_DU
         (.rate_limits.five_hour.resets_at // ""),
         (.rate_limits.seven_day.used_percentage // ""),
         (.rate_limits.seven_day.resets_at // ""),
-        (.effort.level // "")
+        ((.effort | objects | .level | strings) // "")
     ] | join("\u001f")' 2>/dev/null)
 
 # ── Model ─────────────────────────────────────────────────────────────────────
@@ -145,8 +148,8 @@ MODEL="${MODEL//[$'\x01'-$'\x1f'$'\x7f']/}"
 # effort.level on stdin is the live session value and follows a mid-session
 # /effort change. settings.json only ever holds the configured default, so it goes
 # stale the moment the level is changed — stdin wins, and the file stays as the
-# fallback for a Claude Code that does not send the field, or a model with no
-# effort parameter. Ultracode is not a separate level: it reports as xhigh.
+# fallback for a Claude Code that does not send the field. The field is also absent
+# for a model with no effort parameter; the two cases cannot be told apart.
 EFFORT_RAW="$J_EFFORT"
 if [ -z "$EFFORT_RAW" ] && [ -f "$SETTINGS_FILE" ]; then
     EFFORT_RAW=$(jq -r '.effortLevel // empty' "$SETTINGS_FILE" 2>/dev/null)
@@ -200,6 +203,9 @@ read_oauth_token() {
         jq -r '.claudeAiOauth.accessToken // empty' "$CREDENTIALS_FILE" 2>/dev/null
         return
     fi
+    # An explicit CREDENTIALS_FILE means "this file only" (tests pass /dev/null):
+    # never fall through to the real Keychain.
+    [ "$CREDENTIALS_FILE" = "$DEFAULT_CREDENTIALS_FILE" ] || return
     if [ "$(uname)" = "Darwin" ] && command -v security >/dev/null 2>&1; then
         security find-generic-password -s "Claude Code-credentials" -a "$(whoami)" -w 2>/dev/null \
             | jq -r '.claudeAiOauth.accessToken // empty' 2>/dev/null
@@ -211,9 +217,10 @@ refresh_usage_api() {
     token=$(read_oauth_token)
     [ -z "$token" ] && return 1
     local resp
-    resp=$(curl -s --max-time 3 \
+    # Header via stdin (-H @-), not argv: other local users can read argv in ps.
+    resp=$(printf 'Authorization: Bearer %s\n' "$token" | curl -s --max-time 3 \
         "https://api.anthropic.com/api/oauth/usage" \
-        -H "Authorization: Bearer $token" \
+        -H @- \
         -H "anthropic-beta: oauth-2025-04-20" \
         -H "Content-Type: application/json" 2>/dev/null)
     echo "$resp" | jq -e '.five_hour.utilization' >/dev/null 2>&1 || return 1
@@ -263,11 +270,9 @@ if [ "$NEED_API" = 1 ] && [ "$(cache_age_sec)" -gt "$REFRESH_INTERVAL" ]; then
     if command -v flock >/dev/null 2>&1; then
         ( flock -n 9 || exit 0; refresh_usage_api ) 9>"$LOCK_FILE" 2>/dev/null
     else
-        # macOS does not ship `flock` by default. The cache_age_sec gate above
-        # already throttles to one refresh per REFRESH_INTERVAL; concurrent
-        # renders racing through that gate would cause at most 1-2 duplicate
-        # API calls per interval for a single user, which is acceptable.
-        refresh_usage_api
+        # macOS has no `flock`. Without a lock, windows that render while the
+        # cache is stale each make their own call; better than never refreshing.
+        refresh_usage_api 2>/dev/null
     fi
 fi
 
@@ -293,7 +298,7 @@ fi
 # (API format); the Sonnet weekly quota is API-only (absent from stdin).
 if [ -f "$USAGE_FILE" ]; then
     IFS=$'\x1f' read -r CACHE_SOURCE U_SESS_PCT U_SESS_RESETS U_WEEK_PCT U_WEEK_RESETS U_SONNET_PCT \
-        < <(jq -r '[
+        < <(jq -j '[
             (.source // "legacy"),
             (.metrics.session.percent_used     // ""),
             (.metrics.session.resets_at        // ""),

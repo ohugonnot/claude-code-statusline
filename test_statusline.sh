@@ -478,7 +478,7 @@ OUT=$(run_statusline '{"model":"claude-sonnet-4-6","context_window":{"used_perce
 assert_contains "stdin high wins over settings.json low" "/hi" "$OUT"
 assert_not_contains "stale settings level not shown" "/lo" "$OUT"
 
-# xhigh is a real level (ultracode reports as xhigh)
+# xhigh is a level of its own (default for some models)
 OUT=$(run_statusline '{"model":"claude-sonnet-4-6","context_window":{"used_percentage":0},"effort":{"level":"xhigh"}}' \
     USAGE_FILE=/dev/null SETTINGS_FILE=/dev/null)
 assert_contains "effort xhigh → /xh" "/xh" "$OUT"
@@ -492,6 +492,58 @@ assert_contains "settings.json still the fallback" "/lo" "$OUT"
 OUT=$(run_statusline '{"model":"claude-sonnet-4-6","context_window":{"used_percentage":0},"effort":{"level":"turbo"}}' \
     USAGE_FILE=/dev/null SETTINGS_FILE=/dev/null)
 assert_not_contains "unknown level appends nothing to the model" "4.6/" "$OUT"
+
+# A malformed effort field must not take the other fields down with it: jq used
+# to fail on the whole array, which dropped the model and zeroed the context.
+OUT=$(run_statusline '{"model":"claude-sonnet-4-6","context_window":{"used_percentage":40},"effort":"high"}' \
+    USAGE_FILE=/dev/null SETTINGS_FILE=/dev/null)
+assert_contains "effort as a string keeps the model" "Snt 4.6 │" "$OUT"
+assert_contains "effort as a string keeps the context" "40%" "$OUT"
+
+# Test 31 — OAuth token: Keychain fallback (macOS) and how it reaches curl.
+# Fake uname/security/curl in front of PATH; none of this touches the real API.
+echo ""
+echo "-- Test 31: Keychain fallback and token handling --"
+FAKE_HOME=$(mktemp -d /tmp/test-home-XXXX); mkdir -p "$FAKE_HOME/.claude" "$FAKE_HOME/bin"
+CALLS="$FAKE_HOME/calls"
+cat > "$FAKE_HOME/bin/security" <<EOF
+#!/bin/sh
+echo security >> "$CALLS"
+echo '{"claudeAiOauth":{"accessToken":"tok-from-keychain"}}'
+EOF
+cat > "$FAKE_HOME/bin/curl" <<EOF
+#!/bin/sh
+echo "curl argv: \$*" >> "$CALLS"
+echo "curl stdin: \$(cat)" >> "$CALLS"
+echo '{"five_hour":{"utilization":42,"resets_at":"2099-01-01T00:00:00+00:00"},"seven_day":{"utilization":5,"resets_at":"2099-01-01T00:00:00+00:00"}}'
+EOF
+chmod +x "$FAKE_HOME/bin/security" "$FAKE_HOME/bin/curl"
+fake_os() {  # <Darwin|Linux> — what the fake uname reports
+    printf '#!/bin/sh\necho %s\n' "$1" > "$FAKE_HOME/bin/uname"; chmod +x "$FAKE_HOME/bin/uname"
+}
+run_fake_home() {  # <json> [VAR=value...] — default credentials path, no cache yet
+    local json="$1"; shift
+    : > "$CALLS"; rm -f "$FAKE_HOME/usage.json"
+    echo "$json" | env -u CREDENTIALS_FILE PATH="$FAKE_HOME/bin:$PATH" HOME="$FAKE_HOME" \
+        XDG_RUNTIME_DIR="$FAKE_HOME" USAGE_FILE="$FAKE_HOME/usage.json" SETTINGS_FILE=/dev/null \
+        "$@" bash "$STATUSLINE_SH" 2>/dev/null
+}
+NO_RL='{"model":"claude-sonnet-4-6","context_window":{"used_percentage":0}}'
+
+fake_os Darwin
+OUT=$(run_fake_home "$NO_RL")
+assert_contains "macOS without credentials file reads the Keychain" "security" "$(cat "$CALLS")"
+assert_contains "Keychain token reaches the API" "Bearer tok-from-keychain" "$(cat "$CALLS")"
+assert_contains "usage from the API is shown" "42%" "$OUT"
+assert_not_contains "token never in curl argv (visible in ps)" "tok-from-keychain" "$(grep 'curl argv' "$CALLS")"
+
+run_fake_home "$NO_RL" CREDENTIALS_FILE=/dev/null >/dev/null
+assert_eq "explicit CREDENTIALS_FILE never falls back to the Keychain" "" "$(cat "$CALLS")"
+
+fake_os Linux
+run_fake_home "$NO_RL" >/dev/null
+assert_eq "no Keychain lookup outside macOS" "" "$(cat "$CALLS")"
+rm -rf "$FAKE_HOME"
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo ""
