@@ -15,6 +15,7 @@ SHOW_WEEKLY="${SHOW_WEEKLY:-0}"                      # set to 1 to show weekly +
 SHOW_MODEL_WEEKLY="${SHOW_MODEL_WEEKLY:-1}"          # 0 = hide the per-model weekly quota and never call the API for it
 SHOW_DIR="${SHOW_DIR:-0}"                            # 1 = lead with the project directory name
 SHOW_CONTEXT_TOKENS="${SHOW_CONTEXT_TOKENS:-0}"      # 1 = context as "194k/1000k" instead of a percentage
+STATUSLINE_STYLE="${STATUSLINE_STYLE:-emoji}"        # emoji | plain (ANSI colors, no emoji)
 USAGE_FILE="${USAGE_FILE:-$HOME/.claude/usage-exact.json}"
 DEFAULT_CREDENTIALS_FILE="$HOME/.claude/.credentials.json"
 CREDENTIALS_FILE="${CREDENTIALS_FILE:-$DEFAULT_CREDENTIALS_FILE}"
@@ -73,19 +74,36 @@ num() {
     echo "$(( 10#${v:-0} ))"   # 10# forces base 10 — a leading zero would be read as octal
 }
 
-# make_bar <percent> → sets BAR_COLOR and BAR_STR (6-block bar)
+is_plain() { [ "$STATUSLINE_STYLE" = "plain" ]; }
+
+# ANSI palette of the plain style
+C_RESET=$'\033[0m' C_DIM=$'\033[2m' C_DIR=$'\033[1;93m' C_TIMER=$'\033[35m'
+C_GREEN=$'\033[38;5;194m' C_ORANGE=$'\033[38;5;208m' C_RED=$'\033[31m'
+
+# make_bar <percent> → sets BAR_COLOR and BAR_STR.
+# emoji style: 6 blocks of ▓ and a colored dot; plain style: 10 blocks of █ and an
+# ANSI color. Both steps (17 = ceil(100/6), and 10) fill the bar exactly at 100%.
 make_bar() {
     local pct; pct="$(num "$1")"
     [ "$pct" -gt 100 ] && pct=100
-    local filled=$(( (pct + 16) / 17 )); [ $filled -gt 6 ] && filled=6   # 17 = ceil(100/6): round onto 6 blocks
-    local empty=$(( 6 - filled ))
+    local blocks=6 step=17 fill="▓"
+    is_plain && blocks=10 step=10 fill="█"
+    local filled=$(( (pct + step - 1) / step )); [ "$filled" -gt "$blocks" ] && filled=$blocks
+    local empty=$(( blocks - filled ))
     BAR_STR=""
     local i
-    for ((i=0; i<filled; i++)); do BAR_STR+="▓"; done
+    for ((i=0; i<filled; i++)); do BAR_STR+="$fill"; done
     for ((i=0; i<empty;  i++)); do BAR_STR+="░"; done
-    if   [ "$pct" -lt 50 ]; then BAR_COLOR="🟢"
-    elif [ "$pct" -lt 80 ]; then BAR_COLOR="🟡"
-    else                         BAR_COLOR="🔴"
+    if is_plain; then
+        if   [ "$pct" -lt 50 ]; then BAR_COLOR="$C_GREEN"
+        elif [ "$pct" -lt 80 ]; then BAR_COLOR="$C_ORANGE"
+        else                         BAR_COLOR="$C_RED"
+        fi
+    else
+        if   [ "$pct" -lt 50 ]; then BAR_COLOR="🟢"
+        elif [ "$pct" -lt 80 ]; then BAR_COLOR="🟡"
+        else                         BAR_COLOR="🔴"
+        fi
     fi
 }
 
@@ -104,6 +122,17 @@ render_quota() {
     local out="${emoji} ${BAR_COLOR} ${BAR_STR} ${pct}%"
     [ -n "$remain" ] && out="${out} ↻ ${remain}"
     echo "$out"
+}
+
+# render_quota_plain <label> <percent> <reset_epoch> → "label [bar] pct%" in ANSI color.
+# Same rollover rule as render_quota. No countdown: the plain style renders the
+# 5-hour reset as a segment of its own.
+render_quota_plain() {
+    local label="$1" reset="$3" pct
+    pct="$(num "$2")"
+    if [ -n "$reset" ] && [ "$reset" -le "$NOW" ] 2>/dev/null; then pct=0; fi
+    make_bar "$pct"
+    echo "${BAR_COLOR}${label} [${BAR_STR}] ${pct}%${C_RESET}"
 }
 
 # ── Read JSON input from stdin ────────────────────────────────────────────────
@@ -295,7 +324,6 @@ if [ "$NEED_API" = 1 ] && [ "$(cache_age_sec)" -gt "$REFRESH_INTERVAL" ]; then
 fi
 
 # ── Resolve usage metrics: native stdin (preferred) → API cache (fallback) ────
-BLOCK_DISPLAY="" WEEK_DISPLAY=""
 NOW=$(date +%s)
 
 SESS_PCT="" SESS_EPOCH="" SESS_FROM_CACHE=0
@@ -341,14 +369,17 @@ if [ -f "$USAGE_FILE" ]; then
     fi
 fi
 
-# ── Render ────────────────────────────────────────────────────────────────────
-[ -n "$SESS_PCT" ] && [ "$SESS_PCT" != "null" ] && \
-    BLOCK_DISPLAY="$(render_quota "⏳" "$SESS_PCT" "$SESS_EPOCH")"
+# ── Stale indicator: only when the session came from the cache. stdin rate_limits
+# are always fresh, so cache age is irrelevant there.
+IS_STALE=0
+if [ "$SESS_FROM_CACHE" = 1 ] && [ -f "$USAGE_FILE" ] && [ "$REFRESH_INTERVAL" -gt 0 ] 2>/dev/null; then
+    [ "$(cache_age_sec)" -gt $(( REFRESH_INTERVAL * 3 )) ] && IS_STALE=1   # 3 missed refresh windows
+fi
 
+WEEK_INT="" WEEK_RESET_LABEL="" MODEL_Q_INT=""
 if [ "$SHOW_WEEKLY" = "1" ]; then
-    WEEK_INT="" WEEK_COLOR="" WEEK_RESET_LABEL="" MODEL_Q_INT="" MODEL_Q_COLOR=""
     if [ -n "$WEEK_PCT" ] && [ "$WEEK_PCT" != "null" ]; then
-        WEEK_INT="$(num "$WEEK_PCT")"; make_bar "$WEEK_INT"; WEEK_COLOR="$BAR_COLOR"
+        WEEK_INT="$(num "$WEEK_PCT")"
         if [ -n "$WEEK_EPOCH" ]; then
             # GNU date -d @epoch || BSD date -r epoch
             WEEK_RESET_LABEL=$(tz_date "${TIMEZONE}" -d "@$WEEK_EPOCH" +"%a %Hh" 2>/dev/null \
@@ -357,30 +388,8 @@ if [ "$SHOW_WEEKLY" = "1" ]; then
         fi
     fi
     if [ "$SHOW_MODEL_WEEKLY" = "1" ] && [ -n "$MODEL_Q_PCT" ] && [ "$MODEL_Q_PCT" != "null" ]; then
-        MODEL_Q_INT="$(num "$MODEL_Q_PCT")"; make_bar "$MODEL_Q_INT"; MODEL_Q_COLOR="$BAR_COLOR"
+        MODEL_Q_INT="$(num "$MODEL_Q_PCT")"
     fi
-    if [ -n "$WEEK_INT" ] && [ -n "$MODEL_Q_INT" ]; then
-        WEEK_DISPLAY="📅 ${WEEK_COLOR} ${WEEK_INT}% / ${MODEL_Q_NAME} ${MODEL_Q_COLOR} ${MODEL_Q_INT}%"
-        [ -n "$WEEK_RESET_LABEL" ] && WEEK_DISPLAY+=" ↻ ${WEEK_RESET_LABEL}"
-    elif [ -n "$WEEK_INT" ]; then
-        WEEK_DISPLAY="📅 ${WEEK_COLOR} ${WEEK_INT}%"
-        [ -n "$WEEK_RESET_LABEL" ] && WEEK_DISPLAY+=" ↻ ${WEEK_RESET_LABEL}"
-    elif [ -n "$MODEL_Q_INT" ]; then
-        WEEK_DISPLAY="${MODEL_Q_NAME} ${MODEL_Q_COLOR} ${MODEL_Q_INT}%"
-    fi
-fi
-
-# ── Stale indicator — ⚠ in place of color dot. Only when session came from the
-# cache: stdin rate_limits are always fresh, so cache age is irrelevant there.
-IS_STALE=0
-if [ "$SESS_FROM_CACHE" = 1 ] && [ -f "$USAGE_FILE" ] && [ "$REFRESH_INTERVAL" -gt 0 ] 2>/dev/null; then
-    [ "$(cache_age_sec)" -gt $(( REFRESH_INTERVAL * 3 )) ] && IS_STALE=1   # 3 missed refresh windows
-fi
-if [ "$IS_STALE" = 1 ] && [ -n "$BLOCK_DISPLAY" ]; then
-    # Exactly one color dot is present; the other two replacements are no-ops.
-    BLOCK_DISPLAY="${BLOCK_DISPLAY/🟢/⚠}"
-    BLOCK_DISPLAY="${BLOCK_DISPLAY/🟡/⚠}"
-    BLOCK_DISPLAY="${BLOCK_DISPLAY/🔴/⚠}"
 fi
 
 DIR_NAME=""
@@ -400,32 +409,109 @@ if [ "$SHOW_CONTEXT_TOKENS" = "1" ]; then
     fi
 fi
 
-# ── Assemble ──────────────────────────────────────────────────────────────────
+# ── Segments ──────────────────────────────────────────────────────────────────
+# One ordered list for both styles. Each seg_* renders itself for the active style
+# and appends to PARTS, or appends nothing when it has nothing to show.
+SEGMENTS=(dir branch model context session week timer cost)
 PARTS=()
-[ -n "$DIR_NAME" ] && PARTS+=("$DIR_NAME")
-[ -n "$BRANCH" ] && PARTS+=("🌿 $BRANCH$DIRTY")
-if [ -n "$MODEL" ] && [ -n "$EFFORT_LABEL" ]; then
-    PARTS+=("$MODEL/$EFFORT_LABEL")
-elif [ -n "$MODEL" ]; then
-    PARTS+=("$MODEL")
-fi
-if [ -n "$CTX_TOKENS_STR" ]; then
-    PARTS+=("$CTX_COLOR $CTX_TOKENS_STR $CTX_BAR")
-elif [ -n "$CTX_PERCENT" ]; then
-    PARTS+=("$CTX_COLOR $CTX_LABEL $CTX_BAR ${CTX_PERCENT}%")
-fi
-[ -n "$BLOCK_DISPLAY" ]       && PARTS+=("$BLOCK_DISPLAY")
-[ -n "$WEEK_DISPLAY" ]        && PARTS+=("$WEEK_DISPLAY")
-# Cost + duration (only if non-zero)
-if [ -n "$COST_STR" ] && [ -n "$DURATION_STR" ]; then
-    PARTS+=("$COST_STR ⏱ $DURATION_STR")
-elif [ -n "$COST_STR" ]; then
-    PARTS+=("$COST_STR")
-fi
 
+seg_dir() {
+    [ -n "$DIR_NAME" ] || return 0
+    if is_plain; then PARTS+=("${C_DIR}${DIR_NAME}${C_RESET}"); else PARTS+=("$DIR_NAME"); fi
+}
+
+seg_branch() {
+    [ -n "$BRANCH" ] || return 0
+    if is_plain; then
+        # No placeholder outside a repository: the segment is dropped instead.
+        [ "$BRANCH" = "(no git)" ] || PARTS+=("${C_DIM}${BRANCH}${DIRTY}${C_RESET}")
+    else
+        PARTS+=("🌿 $BRANCH$DIRTY")
+    fi
+}
+
+seg_model() {
+    [ -n "$MODEL" ] || return 0
+    if [ -n "$EFFORT_LABEL" ]; then PARTS+=("$MODEL/$EFFORT_LABEL"); else PARTS+=("$MODEL"); fi
+}
+
+seg_context() {
+    if [ -n "$CTX_TOKENS_STR" ]; then
+        if is_plain; then PARTS+=("${CTX_COLOR}${CTX_TOKENS_STR} [${CTX_BAR}]${C_RESET}")
+        else PARTS+=("$CTX_COLOR $CTX_TOKENS_STR $CTX_BAR"); fi
+    elif [ -n "$CTX_PERCENT" ]; then
+        if is_plain; then PARTS+=("${CTX_COLOR}${CTX_LABEL} [${CTX_BAR}] ${CTX_PERCENT}%${C_RESET}")
+        else PARTS+=("$CTX_COLOR $CTX_LABEL $CTX_BAR ${CTX_PERCENT}%"); fi
+    fi
+}
+
+seg_session() {
+    { [ -n "$SESS_PCT" ] && [ "$SESS_PCT" != "null" ]; } || return 0
+    local out
+    if is_plain; then
+        out="$(render_quota_plain "5h" "$SESS_PCT" "$SESS_EPOCH")"
+        [ "$IS_STALE" = 1 ] && out="⚠ $out"
+    else
+        out="$(render_quota "⏳" "$SESS_PCT" "$SESS_EPOCH")"
+        if [ "$IS_STALE" = 1 ]; then
+            # ⚠ in place of the color dot. Exactly one dot is present; the other two
+            # replacements are no-ops.
+            out="${out/🟢/⚠}"; out="${out/🟡/⚠}"; out="${out/🔴/⚠}"
+        fi
+    fi
+    PARTS+=("$out")
+}
+
+seg_week() {
+    if is_plain; then
+        [ -n "$WEEK_INT" ]    && PARTS+=("$(render_quota_plain "7d" "$WEEK_INT" "")")
+        [ -n "$MODEL_Q_INT" ] && PARTS+=("$(render_quota_plain "$MODEL_Q_NAME" "$MODEL_Q_INT" "")")
+        return 0
+    fi
+    local week_color="" model_q_color="" out=""
+    [ -n "$WEEK_INT" ]    && { make_bar "$WEEK_INT"; week_color="$BAR_COLOR"; }
+    [ -n "$MODEL_Q_INT" ] && { make_bar "$MODEL_Q_INT"; model_q_color="$BAR_COLOR"; }
+    if [ -n "$WEEK_INT" ] && [ -n "$MODEL_Q_INT" ]; then
+        out="📅 ${week_color} ${WEEK_INT}% / ${MODEL_Q_NAME} ${model_q_color} ${MODEL_Q_INT}%"
+        [ -n "$WEEK_RESET_LABEL" ] && out+=" ↻ ${WEEK_RESET_LABEL}"
+    elif [ -n "$WEEK_INT" ]; then
+        out="📅 ${week_color} ${WEEK_INT}%"
+        [ -n "$WEEK_RESET_LABEL" ] && out+=" ↻ ${WEEK_RESET_LABEL}"
+    elif [ -n "$MODEL_Q_INT" ]; then
+        out="${MODEL_Q_NAME} ${model_q_color} ${MODEL_Q_INT}%"
+    fi
+    [ -n "$out" ] && PARTS+=("$out")
+    return 0
+}
+
+# Plain style only: the 5-hour reset as its own segment, "now/reset (remaining)".
+# The emoji style already carries the countdown inside the session segment.
+seg_timer() {
+    is_plain || return 0
+    { [ -n "$SESS_EPOCH" ] && [ "$SESS_EPOCH" -gt "$NOW" ]; } 2>/dev/null || return 0
+    local clock
+    clock=$(tz_date "${TIMEZONE}" -d "@$SESS_EPOCH" +"%H:%M" 2>/dev/null \
+        || tz_date "${TIMEZONE}" -r "$SESS_EPOCH" +"%H:%M" 2>/dev/null)
+    [ -n "$clock" ] || return 0
+    PARTS+=("${C_TIMER}$(tz_date "${TIMEZONE}" +"%H:%M")${C_DIM}/${clock} ($(format_remaining $(( SESS_EPOCH - NOW ))))${C_RESET}")
+}
+
+# Cost + duration, only when non-zero
+seg_cost() {
+    [ -n "$COST_STR" ] || return 0
+    if [ -z "$DURATION_STR" ]; then PARTS+=("$COST_STR")
+    elif is_plain; then PARTS+=("$COST_STR $DURATION_STR")
+    else PARTS+=("$COST_STR ⏱ $DURATION_STR"); fi
+}
+
+for seg in "${SEGMENTS[@]}"; do "seg_$seg"; done
+
+# ── Assemble ──────────────────────────────────────────────────────────────────
+SEP=" │ "
+is_plain && SEP=" ${C_DIM}|${C_RESET} "
 RESULT=""
 for part in "${PARTS[@]}"; do
-    [ -z "$RESULT" ] && RESULT="$part" || RESULT="$RESULT │ $part"
+    [ -z "$RESULT" ] && RESULT="$part" || RESULT="$RESULT$SEP$part"
 done
 
 echo "${RESULT}"
