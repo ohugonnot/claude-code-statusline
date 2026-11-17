@@ -15,6 +15,8 @@ SHOW_WEEKLY="${SHOW_WEEKLY:-0}"                      # set to 1 to show weekly +
 SHOW_MODEL_WEEKLY="${SHOW_MODEL_WEEKLY:-1}"          # 0 = hide the per-model weekly quota and never call the API for it
 SHOW_DIR="${SHOW_DIR:-0}"                            # 1 = lead with the project directory name
 SHOW_CONTEXT_TOKENS="${SHOW_CONTEXT_TOKENS:-0}"      # 1 = context as "194k/1000k" instead of a percentage
+SHOW_BURN_RATE="${SHOW_BURN_RATE:-0}"                # 1 = tokens/min over the last BURN_WINDOW_MIN minutes
+BURN_WINDOW_MIN="${BURN_WINDOW_MIN:-10}"
 USAGE_FILE="${USAGE_FILE:-$HOME/.claude/usage-exact.json}"
 DEFAULT_CREDENTIALS_FILE="$HOME/.claude/.credentials.json"
 CREDENTIALS_FILE="${CREDENTIALS_FILE:-$DEFAULT_CREDENTIALS_FILE}"
@@ -106,6 +108,34 @@ render_quota() {
     echo "$out"
 }
 
+# burn_rate_per_min <transcript> <window_min> → tokens per minute over the window.
+# Deduplicated on message.id: the transcript logs each assistant message two or
+# three times. Counts input + cache_creation + output, not cache_read, which runs to
+# ~190k per turn and would drown the signal. Divides by the whole window, not the
+# observed span, so a single burst does not spike the number.
+# jq -R + fromjson? per line: the last line can be half-written while Claude Code
+# appends to it, and jq -s would then drop the whole read.
+burn_rate_per_min() {
+    local transcript="$1" window_min cutoff
+    window_min="$(num "$2")"
+    { [ -f "$transcript" ] && [ "$window_min" -gt 0 ]; } || return
+    cutoff=$(( $(date +%s) - window_min * 60 ))
+    tail -n 400 "$transcript" 2>/dev/null | jq -R -n -j \
+        --argjson cutoff "$cutoff" --argjson win "$window_min" '
+        [ inputs | fromjson?
+          | select(type == "object" and .type == "assistant"
+                   and (.message.usage | type) == "object" and (.timestamp | type) == "string")
+          | { id: (.message.id // .uuid // "?"),
+              ts: (.timestamp | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601? // 0),
+              tok: ((.message.usage.input_tokens // 0)
+                    + (.message.usage.cache_creation_input_tokens // 0)
+                    + (.message.usage.output_tokens // 0)) }
+          | select(.ts >= $cutoff) ]
+        | unique_by(.id)
+        | if length == 0 then empty else ((map(.tok) | add) / $win | floor | tostring) end
+    ' 2>/dev/null
+}
+
 # ── Read JSON input from stdin ────────────────────────────────────────────────
 JSON=$(cat)
 
@@ -117,7 +147,7 @@ JSON=$(cat)
 # jq -j, not -r: the Windows jq.exe ends lines with \r\n, and read would keep the
 # \r on the last field.
 IFS=$'\x1f' read -r J_MODEL_DISPLAY J_MODEL_RAW J_CTX_PCT J_CTX_SIZE J_COST J_DURATION J_CWD \
-    J_RL_5H_PCT J_RL_5H_RESET J_RL_7D_PCT J_RL_7D_RESET J_EFFORT J_CTX_TOKENS \
+    J_RL_5H_PCT J_RL_5H_RESET J_RL_7D_PCT J_RL_7D_RESET J_EFFORT J_CTX_TOKENS J_TRANSCRIPT \
     < <(echo "$JSON" | jq -j '[
         (if .model | type == "object" then .model.display_name // "" else "" end),
         (if .model | type == "string" then .model else "" end),
@@ -131,7 +161,8 @@ IFS=$'\x1f' read -r J_MODEL_DISPLAY J_MODEL_RAW J_CTX_PCT J_CTX_SIZE J_COST J_DU
         (.rate_limits.seven_day.used_percentage // ""),
         (.rate_limits.seven_day.resets_at // ""),
         ((.effort | objects | .level | strings) // ""),
-        (.context_window.total_input_tokens // 0)
+        (.context_window.total_input_tokens // 0),
+        (.transcript_path // "")
     ] | join("\u001f")' 2>/dev/null)
 
 # ── Model ─────────────────────────────────────────────────────────────────────
@@ -400,6 +431,16 @@ if [ "$SHOW_CONTEXT_TOKENS" = "1" ]; then
     fi
 fi
 
+BURN_STR=""
+if [ "$SHOW_BURN_RATE" = "1" ] && [ -n "$J_TRANSCRIPT" ]; then
+    BURN_N="$(num "$(burn_rate_per_min "$J_TRANSCRIPT" "$BURN_WINDOW_MIN")")"
+    if [ "$BURN_N" -ge 1000 ]; then
+        BURN_STR="🔥 $(( BURN_N / 1000 )).$(( BURN_N % 1000 / 100 ))k/min"
+    elif [ "$BURN_N" -gt 0 ]; then
+        BURN_STR="🔥 ${BURN_N}/min"
+    fi
+fi
+
 # ── Assemble ──────────────────────────────────────────────────────────────────
 PARTS=()
 [ -n "$DIR_NAME" ] && PARTS+=("$DIR_NAME")
@@ -416,6 +457,7 @@ elif [ -n "$CTX_PERCENT" ]; then
 fi
 [ -n "$BLOCK_DISPLAY" ]       && PARTS+=("$BLOCK_DISPLAY")
 [ -n "$WEEK_DISPLAY" ]        && PARTS+=("$WEEK_DISPLAY")
+[ -n "$BURN_STR" ]            && PARTS+=("$BURN_STR")
 # Cost + duration (only if non-zero)
 if [ -n "$COST_STR" ] && [ -n "$DURATION_STR" ]; then
     PARTS+=("$COST_STR ⏱ $DURATION_STR")

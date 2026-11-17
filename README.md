@@ -131,6 +131,7 @@ Export in your shell profile or edit the top of `statusline.sh`:
 | `SHOW_MODEL_WEEKLY` | `1` | Set to `0` to drop the per-model quota. When Claude Code sends both quota windows on stdin, the script then makes no API call at all |
 | `SHOW_DIR` | `0` | Set to `1` to start the line with the project directory name |
 | `SHOW_CONTEXT_TOKENS` | `0` | Set to `1` to show context as `194k/1000k` instead of a percentage |
+| `SHOW_BURN_RATE` | `0` | Set to `1` to show `🔥 2.5k/min`, the session's tokens per minute over the last `BURN_WINDOW_MIN` minutes (default `10`). Cache reads are left out |
 | `TIMEZONE` | *(system default)* | Override display timezone (e.g. `America/New_York`) |
 | `USAGE_FILE` | `~/.claude/usage-exact.json` | Cache file path |
 | `CREDENTIALS_FILE` | `~/.claude/.credentials.json` | OAuth credentials path (on macOS, the Keychain is read when this default file is missing) |
