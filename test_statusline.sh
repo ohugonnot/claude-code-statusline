@@ -608,6 +608,41 @@ render_with_api "{$RESP_WINDOWS}" SHOW_MODEL_WEEKLY=0 >/dev/null
 assert_eq "SHOW_MODEL_WEEKLY=0 makes no API call" "0" "$(api_calls)"
 rm -rf "$MQ_DIR"
 
+# Test 36 — STATUSLINE_STYLE=plain: same segments, no emoji, ANSI colors
+echo ""
+echo "-- Test 36: STATUSLINE_STYLE=plain --"
+strip_ansi() { sed $'s/\033\\[[0-9;]*m//g'; }
+
+STATUSLINE_STYLE=plain make_bar 100
+assert_eq "plain bar is full at 100%" "██████████" "$BAR_STR"
+STATUSLINE_STYLE=plain make_bar 1
+assert_eq "plain bar: any usage lights the first block" "█░░░░░░░░░" "$BAR_STR"
+make_bar 100
+assert_eq "emoji bar unchanged" "▓▓▓▓▓▓" "$BAR_STR"
+
+PLAIN_NOW=$(date +%s)
+PLAIN_JSON="{\"model\":\"claude-sonnet-4-6\",\"workspace\":{\"current_dir\":\"/nonexistent/my-project\"},\
+\"context_window\":{\"used_percentage\":19},\"cost\":{\"total_cost_usd\":1.23,\"total_duration_ms\":600000},\
+\"rate_limits\":{\"five_hour\":{\"used_percentage\":30,\"resets_at\":$(( PLAIN_NOW + 5430 ))},\
+\"seven_day\":{\"used_percentage\":42,\"resets_at\":$(( PLAIN_NOW + 86400 ))}}}"
+RAW=$(run_statusline "$PLAIN_JSON" USAGE_FILE=/dev/null SETTINGS_FILE=/dev/null SHOW_WEEKLY=1 \
+    SHOW_MODEL_WEEKLY=0 SHOW_DIR=1 STATUSLINE_STYLE=plain)
+OUT=$(echo "$RAW" | strip_ansi)
+assert_contains "plain line, segment by segment" \
+    "my-project | Snt 4.6 | Ctx [██░░░░░░░░] 19% | 5h [███░░░░░░░] 30% | 7d [█████░░░░░] 42% | " "$OUT"
+assert_contains "5h reset as its own segment, then cost and duration" "(1h30m) | \$1.23 10m" "$OUT"
+assert_contains "colored with ANSI codes" $'\033[' "$RAW"
+for glyph in "🌿" "🟢" "⏳" "📅" "⏱" "│" "(no git)"; do
+    assert_not_contains "plain: no $glyph" "$glyph" "$OUT"
+done
+
+USAGE_PLAIN_STALE=$(mktemp /tmp/test-usage-plain-stale-XXXX.json); TMPFILES+=("$USAGE_PLAIN_STALE")
+echo '{"source":"api","metrics":{"session":{"percent_used":55.0,"resets_at":null}}}' > "$USAGE_PLAIN_STALE"
+touch_ago 16 "$USAGE_PLAIN_STALE"
+OUT=$(run_statusline '{"model":"claude-sonnet-4-6"}' USAGE_FILE="$USAGE_PLAIN_STALE" REFRESH_INTERVAL=300 \
+    STATUSLINE_STYLE=plain | strip_ansi)
+assert_contains "plain keeps the stale-cache ⚠" "⚠ 5h [██████░░░░] 55%" "$OUT"
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

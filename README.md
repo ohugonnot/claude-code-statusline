@@ -36,6 +36,14 @@ With `SHOW_WEEKLY=1`:
 |---------|---------|-------------|
 | **Weekly** | `📅 🟢 17% / Fable 🟢 10% ↻ thu 13h` | Weekly all-models quota, then the per-model quota your plan has (named after the model), reset day |
 
+With `STATUSLINE_STYLE=plain`, the same segments without emoji, colored with ANSI codes, 10-block bars, and the 5-hour reset as a segment of its own (`now/reset (remaining)`):
+
+```
+main★ | Opus 4.6 | 1M [█████░░░░░] 42% | 5h [████░░░░░░] 35% | 7d [██░░░░░░░░] 17% | Fable [█░░░░░░░░░] 10% | 14:20/16:50 (2h30m) | $0.42 1h4m
+```
+
+Outside a git repository the plain style drops the branch segment instead of printing `(no git)`.
+
 ## How it works
 
 ```
@@ -131,6 +139,7 @@ Export in your shell profile or edit the top of `statusline.sh`:
 | `SHOW_MODEL_WEEKLY` | `1` | Set to `0` to drop the per-model quota. When Claude Code sends both quota windows on stdin, the script then makes no API call at all |
 | `SHOW_DIR` | `0` | Set to `1` to start the line with the project directory name |
 | `SHOW_CONTEXT_TOKENS` | `0` | Set to `1` to show context as `194k/1000k` instead of a percentage |
+| `STATUSLINE_STYLE` | `emoji` | Set to `plain` for an emoji-free line in ANSI colors (see above) |
 | `TIMEZONE` | *(system default)* | Override display timezone (e.g. `America/New_York`) |
 | `USAGE_FILE` | `~/.claude/usage-exact.json` | Cache file path |
 | `CREDENTIALS_FILE` | `~/.claude/.credentials.json` | OAuth credentials path (on macOS, the Keychain is read when this default file is missing) |

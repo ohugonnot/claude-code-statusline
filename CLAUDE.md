@@ -46,6 +46,7 @@ Claude Code → JSON stdin → statusline.sh → formatted status string
 - **Inline API call**: single `curl` (~200ms), atomic `mktemp + mv` write, `flock` so concurrent windows don't double-call (macOS has no `flock`: it refreshes unlocked). Token passed to curl on stdin (`-H @-`), never in argv. No background processes, no tmux, no python.
 - **Cross-platform**: GNU vs BSD `stat` in `file_mtime()`, GNU `date -d` with a BSD `date -j` fallback in `iso_to_epoch()`. Avoids `grep -P`. `jq -j` (not `-r`) before `read`: Windows `jq.exe` ends lines with `\r\n`.
 - **Graceful degradation**: token/network/endpoint failure → silently fall back to cached data, or render without usage bars.
+- **One segment list, two styles**: `SEGMENTS` fixes the order; each `seg_<name>` renders itself for `STATUSLINE_STYLE` (`emoji` or `plain`) and appends to `PARTS`, or appends nothing. A new segment is one function plus one entry in the list. The emoji output must stay byte-for-byte unchanged.
 - **No legacy tmux cache parsing**: the v1 `resets`-text format is no longer parsed (it was GNU-only / broken on macOS). A v1 cache just shows no usage until the next API refresh repopulates it; `install.sh` still cleans up v1 artifacts.
 
 ### Usage API
@@ -78,6 +79,7 @@ Tracked upstream: [anthropics/claude-code#13585](https://github.com/anthropics/c
 | `SHOW_MODEL_WEEKLY` | `1` | `0` hides the per-model quota; with both windows on stdin, `NEED_API` drops to 0 |
 | `SHOW_DIR` | `0` | Leading project directory name (handles `\` paths) |
 | `SHOW_CONTEXT_TOKENS` | `0` | Context as `194k/1000k` (`total_input_tokens` = current context, not a session total) |
+| `STATUSLINE_STYLE` | `emoji` | `plain`: ANSI colors, 10-block `█` bars, `|` separator, 5h reset as its own segment, no `(no git)` placeholder |
 | `USAGE_FILE` | `~/.claude/usage-exact.json` | Cache location |
 | `CREDENTIALS_FILE` | `~/.claude/.credentials.json` | OAuth token source; macOS Keychain fallback only when left at the default (tests pass `/dev/null`) |
 | `SETTINGS_FILE` | `~/.claude/settings.json` | Effort-level fallback when stdin has no `effort` (also used by tests) |
