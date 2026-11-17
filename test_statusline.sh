@@ -608,6 +608,47 @@ render_with_api "{$RESP_WINDOWS}" SHOW_MODEL_WEEKLY=0 >/dev/null
 assert_eq "SHOW_MODEL_WEEKLY=0 makes no API call" "0" "$(api_calls)"
 rm -rf "$MQ_DIR"
 
+# Test 35 — SHOW_BURN_RATE from the session transcript
+echo ""
+echo "-- Test 35: SHOW_BURN_RATE --"
+iso_min_ago() {  # <N> → UTC ISO 8601 with milliseconds, N minutes ago (the transcript format)
+    date -u -d "$1 minutes ago" '+%Y-%m-%dT%H:%M:%S.000Z' 2>/dev/null \
+        || date -u -v-"$1"M '+%Y-%m-%dT%H:%M:%S.000Z'
+}
+assistant_line() {  # <id> <minutes ago> <input> <cache_creation> <output> <cache_read>
+    printf '{"type":"assistant","timestamp":"%s","message":{"id":"%s","usage":{"input_tokens":%s,"cache_creation_input_tokens":%s,"output_tokens":%s,"cache_read_input_tokens":%s}}}\n' \
+        "$(iso_min_ago "$2")" "$1" "$3" "$4" "$5" "$6"
+}
+BURN_TRANSCRIPT=$(mktemp); TMPFILES+=("$BURN_TRANSCRIPT")
+{
+    assistant_line m-old 60 100000 0 0 0
+    printf '{"type":"user","timestamp":"%s","message":{"content":"hi"}}\n' "$(iso_min_ago 3)"
+    assistant_line m1 2 1000 500 500 190000
+    assistant_line m1 2 1000 500 500 190000
+    assistant_line m2 1 23000 0 0 190000
+    printf '{"type":"assistant","message":{"id":"m3","usage":{"input_tok'
+} > "$BURN_TRANSCRIPT"
+BURN_JSON="{\"model\":\"claude-sonnet-4-6\",\"transcript_path\":\"$BURN_TRANSCRIPT\"}"
+
+OUT=$(run_statusline "$BURN_JSON" USAGE_FILE=/dev/null)
+assert_not_contains "off by default" "/min" "$OUT"
+
+# (2000 for m1 once + 23000 for m2) / 10 min; the old message is outside the window,
+# cache_read is not counted, and the half-written last line does not void the read.
+OUT=$(run_statusline "$BURN_JSON" USAGE_FILE=/dev/null SHOW_BURN_RATE=1)
+assert_contains "deduplicated, no cache_read, divided by the window" "│ 🔥 2.5k/min" "$OUT"
+
+OUT=$(run_statusline "$BURN_JSON" USAGE_FILE=/dev/null SHOW_BURN_RATE=1 BURN_WINDOW_MIN=200)
+assert_contains "wider window takes the old message in; under 1k, bare tokens" "🔥 625/min" "$OUT"
+
+OUT=$(run_statusline '{"model":"claude-sonnet-4-6"}' USAGE_FILE=/dev/null SHOW_BURN_RATE=1)
+assert_not_contains "no transcript path: no segment" "/min" "$OUT"
+
+BURN_CANARY=$(mktemp -u); TMPFILES+=("$BURN_CANARY")
+run_statusline "$BURN_JSON" USAGE_FILE=/dev/null SHOW_BURN_RATE=1 \
+    BURN_WINDOW_MIN="x[\$(touch $BURN_CANARY)]" >/dev/null
+assert_absent "BURN_WINDOW_MIN goes through num()" "$BURN_CANARY"
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
